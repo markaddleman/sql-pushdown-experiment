@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="Deps: com.google.javascript/closure-compiler-unshaded:v20210202">
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/com/google/javascript/closure-compiler-unshaded/v20210202/closure-compiler-unshaded-v20210202.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
