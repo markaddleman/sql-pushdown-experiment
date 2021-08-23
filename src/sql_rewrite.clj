@@ -19,7 +19,9 @@
         {& ?rest}
 
         {:having [] & ?rest}
-        {& ?rest}))))
+        {& ?rest}
+
+        #_#_(m/pred list? (m/seqable ?a ?b)) [?a ?b]))))
 
 (declare normalize-honey)
 (defn normalize-expr [expr alias]
@@ -129,6 +131,7 @@
        (set)))
 
 (defn incorporate-col [col select-expr]
+  (println (merge {col col} select-expr))
   (merge {col col} select-expr))
 
 (defn incorporate-cols [optimized-honey cols]
@@ -161,23 +164,21 @@
          &       ?rest})))
 
 (comment
-  (let [honey {:with   [[{:select [] :from [:t]} :v]]
-               :select [:a] :from [:v]}
+  (-> {:where true,
+       :group-by [],
+       :having [],
+       :select {:a :a},
+       :from {:x :x},
+       :with {:y {:where true, :group-by [], :having [], :select {}, :from {:z :z}},
+              :x {:where true, :group-by [], :having [], :from {:y :y}, :select {:a :a}}}}
+      (cols-to-push-down))
+  (let [honey {:with   [[{:select [] :from [:z]} :y]
+                        [{:select [] :from [:y]} :x]]
+               :select [:a] :from [:x]}
         normalized-honey (normalize-honey honey identity)
         cols-to-push-down (cols-to-push-down normalized-honey)]
-    (reverse-optimize-honey
-      (incorporate-cols (optimize-honey normalized-honey)
-                        cols-to-push-down))))
-
-(comment
-  (-> {:where    true,
-       :group-by [],
-       :having   [],
-       :select   [[:a :a]],
-       :from     [[:v :v]],
-       :with     [[{:where true, :group-by [], :having [], :select [[:a :a]], :from [[:t :t]]} :v]]}
-      (simplify)
-      (h/format)))
+    (-> (optimize-honey normalized-honey)
+        (incorporate-cols cols-to-push-down))))
 
 (deftest optimized-honey
   (is (= {:select {:a :a, :b :b}, :from {:t :t}}
