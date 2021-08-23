@@ -1,9 +1,14 @@
 (ns sql-rewrite
   (:require [meander.epsilon :as m]
             [meander.strategy.epsilon :as m*]
+            [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
+
+; reverse-optimize to use topo sort
+; support order-by
+; support windowing clause
 
 (def simplify
   (m*/bottom-up
@@ -19,9 +24,7 @@
         {& ?rest}
 
         {:having [] & ?rest}
-        {& ?rest}
-
-        #_#_(m/pred list? (m/seqable ?a ?b)) [?a ?b]))))
+        {& ?rest}))))
 
 (declare normalize-honey)
 (defn normalize-expr [expr alias]
@@ -145,7 +148,6 @@
       (cols-to-push-down)))
 
 (defn incorporate-col [col select-expr]
-  (println (merge {col col} select-expr))
   (merge {col col} select-expr))
 
 (defn incorporate-cols [optimized-honey cols]
@@ -158,9 +160,42 @@
               {:with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
                                     &       ?rest-view}
                       &            ?rest-with}
-               &     ?rest-query}))
+               &     ?rest-query}
+
+              ?? ??))
           optimized-honey
           cols))
+
+(defn topological-sort [optimized-honey]
+  (into [] (filter (complement nil?))
+        (-> (reduce (fn [graph [source dep]]
+                      (dep/depend graph dep source))
+                    (dep/graph)
+                    (-> optimized-honey
+                        (m/search
+                          {:with {?from-alias _}
+                           :from (m/scan [_ ?from-alias])}
+                          [?from-alias nil])))
+            (dep/topo-sort))))
+
+(comment
+  (= [] (-> {:select [] :from [:v]}
+            (normalize-honey identity)
+            (optimize-honey)
+            (topological-sort)))
+
+  (= [:v] (-> {:with   [[{:select [] :from []} :v]]
+               :select [] :from [:v]}
+              (normalize-honey identity)
+              (optimize-honey)
+              (topological-sort)))
+
+  (= [:v :x] (-> {:with   [[{:select [] :from [:x]} :v]
+                           [{:select [] :from []} :x]]
+                  :select [] :from [:v]}
+                 (normalize-honey identity)
+                 (optimize-honey)
+                 (topological-sort))))
 
 (defn reverse-optimize-honey [optimized-honey]
   (-> optimized-honey
@@ -177,23 +212,15 @@
          :from   (m/app (partial into []) ?from-expr)
          &       ?rest})))
 
-(comment
-  (-> {:where    true,
-       :group-by [],
-       :having   [],
-       :select   {:a :a},
-       :from     {:x :x},
-       :with     {:y {:where true, :group-by [], :having [], :select {}, :from {:z :z}},
-                  :x {:where true, :group-by [], :having [], :from {:y :y}, :select {:a :a}}}}
-      (cols-to-push-down)
-      (tap>))
-  (let [honey {:with   [[{:select [] :from [:z]} :y]
-                        [{:select [] :from [:y]} :x]]
-               :select [:a] :from [:x]}
-        normalized-honey (normalize-honey honey identity)
-        cols-to-push-down (cols-to-push-down normalized-honey)]
-    (-> (optimize-honey normalized-honey)
-        (incorporate-cols cols-to-push-down))))
+(defn push-down [normalized-honey]
+  (loop [optimized-honey (optimize-honey normalized-honey)
+         prev nil]
+    (if (= prev optimized-honey)
+      (reverse-optimize-honey optimized-honey)
+      (recur (incorporate-cols
+               optimized-honey
+               (cols-to-push-down optimized-honey))
+             optimized-honey))))
 
 (deftest optimized-honey
   (is (= {:select {:a :a, :b :b}, :from [[:t :t]]}
@@ -330,3 +357,27 @@
              (normalize-honey identity)
              (optimize-honey)
              (cols-to-push-down)))))
+
+(deftest push-downs
+  (is (= {:select [[:a :a]]}
+         (-> {:select [:a]}
+             (normalize-honey identity)
+             (push-down)
+             (simplify))))
+
+  (is (= {:select [[:a :a]] :from [[:t :t]]}
+         (-> {:select [:a] :from [:t]}
+             (normalize-honey identity)
+             (push-down)
+             (simplify))))
+
+  (is (= '{:select [(:a :a)],
+           :from   [[:x :x]],
+           :with   [[{:select [(:a :a)], :from [[:y :y]]} :x]
+                    [{:select [(:a :a)], :from [[:z :z]]} :y]]}
+         (-> {:with   [[{:select [] :from [:y]} :x]
+                       [{:select [] :from [:z]} :y]]
+              :select [:a] :from [:x]}
+             (normalize-honey identity)
+             (push-down)
+             (simplify)))))
