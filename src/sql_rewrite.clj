@@ -6,9 +6,9 @@
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
-; reverse-optimize to use topo sort
 ; support order-by
 ; support windowing clause
+; support ::bq/with
 
 (def simplify
   (m*/bottom-up
@@ -68,7 +68,10 @@
          :having   [(m/app #(normalize-expr % alias) !having-expr) ...]})))
 
 (comment
-  )
+  (-> {:with   [[{:select [] :from [:x]} :v]
+                [{:select [] :from []} :x]]
+       :select [[{:select [:a] :from [:x]} :b]]}
+      (normalize-honey identity)))
 
 (def constants (comp #{Boolean Long String} (partial class)))
 
@@ -166,51 +169,53 @@
           optimized-honey
           cols))
 
-(defn topological-sort [optimized-honey]
+(defn topo-sort [optimized-honey]
   (into [] (filter (complement nil?))
         (-> (reduce (fn [graph [source dep]]
                       (dep/depend graph dep source))
                     (dep/graph)
                     (-> optimized-honey
                         (m/search
-                          {:with {?from-alias _}
-                           :from (m/scan [_ ?from-alias])}
-                          [?from-alias nil])))
+                          {:with {?view-alias  (m/$ {:from (m/scan [?table-alias _])})
+                                  ?table-alias _}}
+                          [?view-alias ?table-alias]
+
+                          {?with {?table-alias _}
+                           :from [[?table-alias _]]}
+                          [nil ?table-alias])))
             (dep/topo-sort))))
 
-(comment
-  (= [] (-> {:select [] :from [:v]}
-            (normalize-honey identity)
-            (optimize-honey)
-            (topological-sort)))
-
-  (= [:v] (-> {:with   [[{:select [] :from []} :v]]
-               :select [] :from [:v]}
-              (normalize-honey identity)
-              (optimize-honey)
-              (topological-sort)))
-
-  (= [:v :x] (-> {:with   [[{:select [] :from [:x]} :v]
-                           [{:select [] :from []} :x]]
-                  :select [] :from [:v]}
-                 (normalize-honey identity)
-                 (optimize-honey)
-                 (topological-sort))))
-
 (defn reverse-optimize-honey [optimized-honey]
-  (-> optimized-honey
-      (m/rewrite
-        {:with (m/map-of !view-name !view)
-         &     ?rest}
-        {:with [[(m/cata !view) !view-name] ...]
-         &     (m/cata ?rest)}
+  (let [view-order (zipmap (topo-sort optimized-honey)
+                           (map (partial * -1) (range)))]
+    (-> optimized-honey
+        (m/rewrite
+          {:with (m/map-of !view-name !view)
+           &     ?rest}
+          {:with (m/app (comp
+                          vec
+                          (partial sort-by (comp view-order second))
+                          (partial filter (comp (partial contains? view-order)
+                                                second)))
+                        [[(m/cata !view) !view-name] ...])
+           &     (m/cata ?rest)}
 
-        {(m/some :select) ?select-expr
-         :from            ?from-expr
-         &                ?rest}
-        {:select (m/app (partial into []) ?select-expr)
-         :from   (m/app (partial into []) ?from-expr)
-         &       ?rest})))
+          {(m/some :select) ?select-expr
+           :from            ?from-expr
+           &                ?rest}
+          {:select (m/app (partial into []) ?select-expr)
+           :from   (m/app (partial into []) ?from-expr)
+           &       ?rest}))))
+
+(comment
+  (-> {:with   [[{:select [:a] :from [:x]} :v]
+                [{:select [:a] :from [:y]} :x]]
+       :select [:a] :from [:v]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (reverse-optimize-honey)
+      (simplify)
+      (h/format)))
 
 (defn push-down [normalized-honey]
   (loop [optimized-honey (optimize-honey normalized-honey)
@@ -373,11 +378,37 @@
 
   (is (= '{:select [(:a :a)],
            :from   [[:x :x]],
-           :with   [[{:select [(:a :a)], :from [[:y :y]]} :x]
-                    [{:select [(:a :a)], :from [[:z :z]]} :y]]}
+           :with   [[{:select [(:a :a)], :from [[:z :z]]} :y]
+                    [{:select [(:a :a)], :from [[:y :y]]} :x]]}
          (-> {:with   [[{:select [] :from [:y]} :x]
                        [{:select [] :from [:z]} :y]]
               :select [:a] :from [:x]}
              (normalize-honey identity)
              (push-down)
              (simplify)))))
+
+(deftest topo-sorts
+  (is (= [] (-> {:select [] :from [:v]}
+                (normalize-honey identity)
+                (optimize-honey)
+                (topo-sort))))
+
+  (is (= [:v] (-> {:with   [[{:select [] :from []} :v]]
+                   :select [] :from [:v]}
+                  (normalize-honey identity)
+                  (optimize-honey)
+                  (topo-sort))))
+
+  (is (= [:v :x] (-> {:with   [[{:select [] :from [:x]} :v]
+                               [{:select [] :from []} :x]]
+                      :select [] :from [:v]}
+                     (normalize-honey identity)
+                     (optimize-honey)
+                     (topo-sort))))
+
+  (is (= [:v :x] (-> {:with   [[{:select [] :from [:x]} :v]
+                               [{:select [] :from []} :x]]
+                      :select [[{:select [:a] :from [:x]} :b]]}
+                     (normalize-honey identity)
+                     (optimize-honey)
+                     (topo-sort)))))
