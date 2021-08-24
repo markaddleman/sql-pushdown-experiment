@@ -1,13 +1,13 @@
 (ns sql-rewrite
   (:require [meander.epsilon :as m]
             [meander.strategy.epsilon :as m*]
+            [bq :as bq]
             [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
 ; support windowing clause
-; support ::bq/with
 
 (def simplify
   (m*/bottom-up
@@ -59,9 +59,9 @@
 (defn normalize-honey [honey alias]
   (-> honey
       (m/rewrite
-        {:with (m/some (m/seqable (m/seqable !query !query-alias) ...))
-         &     ?rest}
-        {:with [[(m/app #(normalize-expr % alias) !query) (m/app alias !query-alias)] ...]
+        {(m/and (m/or ::bq/with :with) ?with) (m/some (m/seqable (m/seqable !query !query-alias) ...))
+         &                                    ?rest}
+        {?with [[(m/app #(normalize-expr % alias) !query) (m/app alias !query-alias)] ...]
          &     (m/cata ?rest)}
 
         {:select   (m/and (m/gather (m/seqable !col-expr-with-alias !col-expr-alias))
@@ -106,9 +106,9 @@
 (defn optimize-honey [normalized-honey]
   (-> normalized-honey
       (m/rewrite
-        {:with [[!query !query-alias] ...]
-         &     ?rest}
-        {:with (m/map-of !query-alias (m/cata !query))
+        {(m/and (m/or ::bq/with :with) ?with) [[!query !query-alias] ...]
+         &                                    ?rest}
+        {?with (m/map-of !query-alias (m/cata !query))
          &     (m/cata ?rest)}
 
         {:select   [[!col-expr !col-expr-alias] ...]
@@ -126,8 +126,8 @@
 
 (defn cols-to-push-down [optimized-honey]
   (->> (m/rewrite optimized-honey
-         {(m/some :with) (m/map-of !view-name !view)
-          &              ?query}
+         {(m/some (m/or ::bq/with :with)) (m/map-of !view-name !view)
+          &                               ?query}
          [(m/cata !view) ... (m/cata ?query)]
 
          {(m/some :select) (m/map-of _ !expr)
@@ -179,11 +179,11 @@
 (defn incorporate-cols [optimized-honey cols]
   (reduce (fn [optimized-honey [col table-alias]]
             (m/rewrite optimized-honey
-              {:with {~table-alias {:select ?select-expr
-                                    &       ?rest-view}
-                      &            ?rest-with}
-               &     ?rest-query}
-              {:with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
+              {(m/and (m/or ::bq/with :with) ?with) {~table-alias {:select ?select-expr
+                                                                   &       ?rest-view}
+                                                     &            ?rest-with}
+               &                                    ?rest-query}
+              {?with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
                                     &       ?rest-view}
                       &            ?rest-with}
                &     ?rest-query}
@@ -199,12 +199,12 @@
                     (dep/graph)
                     (-> optimized-honey
                         (m/search
-                          {:with {?view-alias  (m/$ {:from (m/scan [?table-alias _])})
-                                  ?table-alias _}}
+                          {(m/or ::bq/with :with) {?view-alias  (m/$ {:from (m/scan [?table-alias _])})
+                                                   ?table-alias _}}
                           [?view-alias ?table-alias]
 
-                          {?with {?table-alias _}
-                           :from [[?table-alias _]]}
+                          {(m/or ::bq/with :with) {?table-alias _}
+                           :from                  [[?table-alias _]]}
                           [nil ?table-alias])))
             (dep/topo-sort))))
 
@@ -213,9 +213,9 @@
                            (map (partial * -1) (range)))]
     (-> optimized-honey
         (m/rewrite
-          {:with (m/map-of !view-name !view)
-           &     ?rest}
-          {:with (m/app (comp
+          {(m/and (m/or ::bq/with :with) ?with) (m/map-of !view-name !view)
+           &                                    ?rest}
+          {?with (m/app (comp
                           vec
                           (partial sort-by (comp view-order second))
                           (partial filter (comp (partial contains? view-order)
