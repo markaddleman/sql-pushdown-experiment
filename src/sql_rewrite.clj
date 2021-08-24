@@ -6,7 +6,6 @@
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
-; support order-by
 ; support windowing clause
 ; support ::bq/with
 
@@ -24,6 +23,9 @@
         {& ?rest}
 
         {:having [] & ?rest}
+        {& ?rest}
+
+        {:order-by [] & ?rest}
         {& ?rest}))))
 
 (declare normalize-honey)
@@ -38,6 +40,21 @@
         (m/app (partial apply h/call) ?name [(m/app #(normalize-expr % alias) !arg) ...])
 
         ?? ??)))
+
+(defn normalize-order-by-expr [expr alias]
+  (-> expr
+      (m/rewrite
+        [_ _ :as ?full-order-by-expr]
+        ?full-order-by-expr
+
+        ?expr
+        [?expr :asc])
+      (m/rewrite
+        [?expr (m/and (m/or :asc :desc) ?order)]
+        [(m/cata ?expr) ?order]
+
+        ?expr
+        (m/app #(normalize-expr % alias) ?expr))))
 
 (defn normalize-honey [honey alias]
   (-> honey
@@ -58,14 +75,16 @@
          :where    (m/or (m/some ?where-expr)
                          (m/let [?where-expr true]))
          :group-by (m/seqable !group-by-expr ...)
-         :having   (m/seqable !having-expr ...)}
+         :having   (m/seqable !having-expr ...)
+         :order-by (m/seqable !order-by-expr ...)}
         {:select   [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
                     [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
          :from     [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
                     [(m/app #(normalize-expr % alias) !table-expr-no-alias-1) (m/app alias !table-expr-no-alias-2)] ...]
          :where    (m/app #(normalize-expr % alias) ?where-expr)
          :group-by [(m/app #(normalize-expr % alias) !group-by-expr) ...]
-         :having   [(m/app #(normalize-expr % alias) !having-expr) ...]})))
+         :having   [(m/app #(normalize-expr % alias) !having-expr) ...]
+         :order-by [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]})))
 
 (comment
   (-> {:with   [[{:select [] :from [:x]} :v]
@@ -96,12 +115,14 @@
          :from     [[!from-expr !from-alias] ...]
          :where    ?where-expr
          :group-by [!group-by-expr ...]
-         :having   [!having-expr ...]}
+         :having   [!having-expr ...]
+         :order-by [[!order-by-expr !order] ...]}
         {:select   (m/map-of !col-expr-alias (m/app optimize-expr !col-expr))
          :from     [[(m/app optimize-expr !from-expr) !from-alias] ...]
          :where    (m/app optimize-expr ?where-expr)
          :group-by [(m/app optimize-expr !group-by-expr) ...]
-         :having   [(m/app optimize-expr !having-expr) ...]})))
+         :having   [(m/app optimize-expr !having-expr) ...]
+         :order-by [[(m/app optimize-expr !order-by-expr) !order] ...]})))
 
 (defn cols-to-push-down [optimized-honey]
   (->> (m/rewrite optimized-honey
@@ -115,12 +136,14 @@
                                                     !query) _]))
           :where           ?where-expr
           :group-by        [!group-by-expr ...]
-          :having          [!having-expr ...]}
+          :having          [!having-expr ...]
+          :order-by        [[!order-by-expr _] ...]}
          [(m/cata [?where-expr ?table-alias])
           [(m/cata [!expr ?table-alias]) ...
            (m/cata !query) ...
            (m/cata [!group-by-expr ?table-alias]) ...
-           (m/cata [!having-expr ?table-alias]) ...]]
+           (m/cata [!having-expr ?table-alias]) ...
+           (m/cata [!order-by-expr ?table-alias]) ...]]
 
          [(m/pred (partial instance? SqlCall) {:args (m/seqable !arg ...)}) ?table-alias]
          [(m/cata [!arg ?table-alias]) ...]
