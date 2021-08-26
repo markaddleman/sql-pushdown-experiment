@@ -57,6 +57,9 @@
                {:name ?name :args (m/seqable !arg ...)})
         (m/app (partial apply sql/call) ?name [(m/app #(normalize-expr % alias) !arg) ...])
 
+        [(m/pred keyword? ?op) & ?args]
+        (m/cata (m/app (fn [op args] (apply sql/call (name op) args)) ?op ?args))
+
         ?? ??)))
 
 (defn normalize-order-by-expr [expr alias]
@@ -124,7 +127,7 @@
       (normalize-honey identity)
       (simplify)))
 
-(def constants (comp #{Boolean Long String} (partial class)))
+(def constant? (comp (some-fn #{Boolean Long String} nil?) (partial class)))
 
 (declare optimize-honey)
 (defn optimize-expr [expr]
@@ -195,7 +198,7 @@
          [(m/pred keyword? ?col) ?table-alias]
          [?col ?table-alias]
 
-         [(m/pred constants ?expr) ?table-alias]
+         [(m/pred constant? ?expr) ?table-alias]
          [])
        (flatten)
        (partition 2)
@@ -514,4 +517,28 @@
                      (topo-sort)))))
 
 (comment
-  )
+  (-> {::bq/with [#_[{:select [:e :o]
+                      :from   [[(sql/call "UNNEST" (sql/call "ARRAY"
+                                                             (sql/call "STRUCT" ["Stage" :e] [0 :o])
+                                                             (sql/call "STRUCT" ["Flow" :e] [1 :o])
+                                                             (sql/call "STRUCT" ["Flow Name" :e] [2 :o])
+                                                             (sql/call "STRUCT" ["Child Count" :e] [3 :o])))
+                                :ordering]]}
+                     :event-ordering]
+                  [{:select [] :from [:t]} :v]]
+       :select   [[(sql/call "WINDOW" (sql/call "IGNORE_NULLS" (sql/call "LAST_VALUE" :attributes/stageName))
+                             {::bq/partition-by [:attributes/caseId]
+                              :order-by         [:timestamp {:select [:o]
+                                                               :from   [:event-ordering]
+                                                               :where  [:= :entity-projected-data/event :e]}]
+                              ::bq/rows-between [(sql/inline "UNBOUNDED PRECEDING")
+                                                 (sql/inline "CURRENT ROW")]})
+                   :event]]
+       :where    [:and
+                  [:= "Stage" :event]                       ; important to preserve :event push down
+                  [:<> nil :attributes/caseId]
+                  [:<> "" :attributes/caseId]]
+       :from     [:v]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (cols-to-push-down)))
