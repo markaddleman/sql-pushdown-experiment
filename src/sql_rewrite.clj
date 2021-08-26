@@ -424,28 +424,6 @@
              (simplify)))))
 
 (deftest push-downs
-  (is (= #{[:a :t] [:c :t] [:b :t] [:inner :s]}
-         (-> {:select [:a
-                       [(h/call "and" (h/call "=" :a :c) :b) :alias]
-                       [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
-             (normalize-honey identity)
-             (optimize-honey)
-             (cols-to-push-down))))
-
-  (is (= #{[:a :t] [:a :s]}
-         (-> {:select [:a] :from [[{:select [:a] :from [:s]} :t]]}
-             (normalize-honey identity)
-             (optimize-honey)
-             (cols-to-push-down))))
-
-  (is (= #{[:b :t] [:a :v]}
-         (-> {:with   [[{:select [:b] :from [:t]} :v]]
-              :select [:a] :from [:v]}
-             (normalize-honey identity)
-             (optimize-honey)
-             (cols-to-push-down)))))
-
-(deftest push-downs
   (is (= {:select [[:a :a]]}
          (-> {:select [:a]}
              (normalize-honey identity)
@@ -486,7 +464,28 @@
               :from   [:v]}
              (normalize-honey identity)
              (push-down)
-             (simplify)))))
+             (simplify))))
+
+  (is (= #{[:a :t] [:c :t] [:b :t] [:inner :s]}
+         (-> {:select [:a
+                       [(h/call "and" (h/call "=" :a :c) :b) :alias]
+                       [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
+             (normalize-honey identity)
+             (optimize-honey)
+             (cols-to-push-down))))
+
+  (is (= #{[:a :t] [:a :s]}
+         (-> {:select [:a] :from [[{:select [:a] :from [:s]} :t]]}
+             (normalize-honey identity)
+             (optimize-honey)
+             (cols-to-push-down))))
+
+  (is (= #{[:b :t] [:a :v]}
+         (-> {:with   [[{:select [:b] :from [:t]} :v]]
+              :select [:a] :from [:v]}
+             (normalize-honey identity)
+             (optimize-honey)
+             (cols-to-push-down)))))
 
 (deftest topo-sorts
   (is (= [] (-> {:select [] :from [:v]}
