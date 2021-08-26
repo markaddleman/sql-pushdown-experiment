@@ -7,6 +7,8 @@
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
+; limit clause
+; offset clause
 ; support windowing clause
 
 (def simplify
@@ -26,7 +28,13 @@
         {& ?rest}
 
         {:order-by [] & ?rest}
-        {& ?rest}))))
+        {& ?rest}
+
+        {:limit nil :offset nil :as ?query}
+        (m/app #(dissoc % :limit :offset) ?query)
+
+        {:offset nil :as ?query}
+        (m/app #(dissoc % :offset) ?query)))))
 
 (declare normalize-honey)
 (defn normalize-expr [expr alias]
@@ -76,7 +84,9 @@
                          (m/let [?where-expr true]))
          :group-by (m/seqable !group-by-expr ...)
          :having   (m/seqable !having-expr ...)
-         :order-by (m/seqable !order-by-expr ...)}
+         :order-by (m/seqable !order-by-expr ...)
+         :limit    ?limit
+         :offset   ?offset}
         {:select   [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
                     [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
          :from     [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
@@ -84,13 +94,16 @@
          :where    (m/app #(normalize-expr % alias) ?where-expr)
          :group-by [(m/app #(normalize-expr % alias) !group-by-expr) ...]
          :having   [(m/app #(normalize-expr % alias) !having-expr) ...]
-         :order-by [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]})))
+         :order-by [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]
+         :limit    ?limit
+         :offset   ?offset})))
 
 (comment
-  (-> {:with   [[{:select [] :from [:x]} :v]
-                [{:select [] :from []} :x]]
-       :select [[{:select [:a] :from [:x]} :b]]}
-      (normalize-honey identity)))
+  (-> {:select [:a
+                [(h/call "and" (h/call "=" :a :c) :b) :alias]
+                [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
+      (normalize-honey identity)
+      (simplify)))
 
 (def constants (comp #{Boolean Long String} (partial class)))
 
@@ -314,6 +327,16 @@
          (-> {:select [:a
                        [(h/call "and" (h/call "=" :a :c) :b) :alias]
                        [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
+             (normalize-honey identity)
+             (simplify))))
+
+  (is (= {:select [[:a :a]] :from [[:t :t]] :limit 10 :offset 10}
+         (-> {:select [:a] :from [:t] :limit 10 :offset 10}
+             (normalize-honey identity)
+             (simplify))))
+
+  (is (= {:select [[:a :a]] :from [[:t :t]] :limit 10}
+         (-> {:select [:a] :from [:t] :limit 10}
              (normalize-honey identity)
              (simplify)))))
 
