@@ -4,7 +4,7 @@
             [bq :as bq]
             [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
-            [honeysql.core :as h])
+            [honeysql.core :as sql])
   (:import [honeysql.types SqlCall]))
 
 ; push down already fully qualified columns
@@ -55,7 +55,7 @@
 
         (m/and (m/pred (partial instance? SqlCall))
                {:name ?name :args (m/seqable !arg ...)})
-        (m/app (partial apply h/call) ?name [(m/app #(normalize-expr % alias) !arg) ...])
+        (m/app (partial apply sql/call) ?name [(m/app #(normalize-expr % alias) !arg) ...])
 
         ?? ??)))
 
@@ -119,7 +119,7 @@
 
 (comment
   (-> {:select [:a
-                [(h/call "and" (h/call "=" :a :c) :b) :alias]
+                [(sql/call "and" (sql/call "=" :a :c) :b) :alias]
                 [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
       (normalize-honey identity)
       (simplify)))
@@ -276,7 +276,7 @@
       (optimize-honey)
       (reverse-optimize-honey)
       (simplify)
-      (h/format)))
+      (sql/format)))
 
 (defn push-down [normalized-honey]
   (loop [optimized-honey (optimize-honey normalized-honey)
@@ -339,18 +339,18 @@
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select [[:a :a]], :from [[:t :t]], :where (h/call "exists" {:select [[:b :b]], :from [[:s :s]]})}
+  (is (= {:select [[:a :a]], :from [[:t :t]], :where (sql/call "exists" {:select [[:b :b]], :from [[:s :s]]})}
          (-> {:select [:a] :from [:t]
-              :where  (h/call "exists" {:select [:b] :from [:s]})}
+              :where  (sql/call "exists" {:select [:b] :from [:s]})}
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select [[(h/call "and" (h/call "=" :a :c) :b) :alias]
+  (is (= {:select [[(sql/call "and" (sql/call "=" :a :c) :b) :alias]
                    [{:select [[:inner :inner]], :from [[:s :s]]} :select-alias]
                    [:a :a]],
           :from   [[:t :t]]}
          (-> {:select [:a
-                       [(h/call "and" (h/call "=" :a :c) :b) :alias]
+                       [(sql/call "and" (sql/call "=" :a :c) :b) :alias]
                        [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
              (normalize-honey identity)
              (simplify))))
@@ -365,18 +365,18 @@
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select [[#sql/call["WINDOW"
-                              #sql/call["LAST_VALUE" :col]
-                              {:bq/rows-between [#sql/inline"UNBOUNDED PRECEDING" #sql/inline"CURRENT ROW"],
+  (is (= {:select [[(sql/call "WINDOW"
+                              (sql/call "LAST_VALUE" :col)
+                              {:bq/rows-between [(sql/inline "UNBOUNDED PRECEDING") (sql/inline "CURRENT ROW")],
                                :order-by        [[:timestamp :asc]],
-                               :bq/partition-by [:caseId]}]
+                               :bq/partition-by [:caseId]})
                     :alias]]
           :from   [[:t :t]]}
-         (-> {:select [[(h/call "WINDOW" (h/call "LAST_VALUE" :col)
-                                {::bq/partition-by [:caseId]
-                                 :order-by         [:timestamp]
-                                 ::bq/rows-between [(h/inline "UNBOUNDED PRECEDING")
-                                                    (h/inline "CURRENT ROW")]}) :alias]]
+         (-> {:select [[(sql/call "WINDOW" (sql/call "LAST_VALUE" :col)
+                                  {::bq/partition-by [:caseId]
+                                   :order-by         [:timestamp]
+                                   ::bq/rows-between [(sql/inline "UNBOUNDED PRECEDING")
+                                                      (sql/inline "CURRENT ROW")]}) :alias]]
               :from   [:t]}
              (normalize-honey identity)
              (simplify)))))
@@ -447,20 +447,20 @@
              (push-down)
              (simplify))))
 
-  (is (= {:select [[#sql/call["WINDOW"
-                              #sql/call["LAST_VALUE" :col]
-                              {:bq/rows-between [#sql/inline"UNBOUNDED PRECEDING" #sql/inline"CURRENT ROW"],
+  (is (= {:select [[(sql/call "WINDOW"
+                              (sql/call "LAST_VALUE" :col)
+                              {:bq/rows-between [(sql/inline "UNBOUNDED PRECEDING") (sql/inline "CURRENT ROW")],
                                :order-by        [[:timestamp :asc]],
-                               :bq/partition-by [:caseId]}]
+                               :bq/partition-by [:caseId]})
                     :alias]],
           :from   [[:v :v]],
           :with   [[{:select [[:col :col] [:timestamp :timestamp] [:caseId :caseId]], :from [[:t :t]]} :v]]}
          (-> {:with   [[{:select [] :from [:t]} :v]]
-              :select [[(h/call "WINDOW" (h/call "LAST_VALUE" :col)
-                                {::bq/partition-by [:caseId]
-                                 :order-by         [:timestamp]
-                                 ::bq/rows-between [(h/inline "UNBOUNDED PRECEDING")
-                                                    (h/inline "CURRENT ROW")]}) :alias]]
+              :select [[(sql/call "WINDOW" (sql/call "LAST_VALUE" :col)
+                                  {::bq/partition-by [:caseId]
+                                   :order-by         [:timestamp]
+                                   ::bq/rows-between [(sql/inline "UNBOUNDED PRECEDING")
+                                                      (sql/inline "CURRENT ROW")]}) :alias]]
               :from   [:v]}
              (normalize-honey identity)
              (push-down)
@@ -468,7 +468,7 @@
 
   (is (= #{[:a :t] [:c :t] [:b :t] [:inner :s]}
          (-> {:select [:a
-                       [(h/call "and" (h/call "=" :a :c) :b) :alias]
+                       [(sql/call "and" (sql/call "=" :a :c) :b) :alias]
                        [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
              (normalize-honey identity)
              (optimize-honey)
