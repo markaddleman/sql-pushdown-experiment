@@ -7,8 +7,6 @@
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
-; limit clause
-; offset clause
 ; support windowing clause
 
 (def simplify
