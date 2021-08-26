@@ -159,7 +159,7 @@
          :having   [(m/app optimize-expr !having-expr) ...]
          :order-by [[(m/app optimize-expr !order-by-expr) !order] ...]})))
 
-(defn cols-to-push-down [optimized-honey]
+(defn cols-to-push-down [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
   (->> (m/rewrite optimized-honey
          {(m/some (m/or ::bq/with :with)) (m/map-of !view-name !view)
           &                               ?query}
@@ -195,14 +195,23 @@
          [{:args (m/seqable !expr ...)} ?table-alias]
          [(m/cata [!expr ?table-alias]) ...]
 
-         [(m/pred keyword? ?col) ?table-alias]
+         [(m/pred unqualified-col? ?col) ?table-alias]
          [?col ?table-alias]
+
+         [(m/pred qualified-col? ?col) ?table-alias]
+         [(m/app unqualified-col ?col) (m/app col-table-ref ?col)]
 
          [(m/pred constant? ?expr) ?table-alias]
          [])
        (flatten)
        (partition 2)
        (set)))
+
+(defn unqualified-col? [v]
+  (and (keyword? v) (not (namespace v))))
+
+(defn qualified-col? [v]
+  (and (keyword? v) (namespace v)))
 
 (comment
   (-> {:where    true,
@@ -212,7 +221,7 @@
        :from     [[:x :x]],
        :with     {:y {:where true, :group-by [], :having [], :select {}, :from [[:z :z]]},
                   :x {:where true, :group-by [], :having [], :from [[:y :y]], :select {:a :a}}}}
-      (cols-to-push-down)))
+      (cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))))
 
 (defn incorporate-col [col select-expr]
   (merge {col col} select-expr))
@@ -240,13 +249,28 @@
                     (dep/graph)
                     (-> optimized-honey
                         (m/search
-                          {(m/or ::bq/with :with) {?view-alias  (m/$ {:from (m/scan [?table-alias _])})
+                          {:select           (m/scan [?expr _])
+                           :where            ?expr
+                           :from             (m/scan [?expr _])
+                           :group-by         (m/scan ?expr)
+                           :having           (m/scan ?expr)
+                           :order-by         (m/scan [?expr _])
+                           ::bq/partition-by (m/scan ?expr)}
+                          (m/cata ?expr)
+
+                          {(m/or ::bq/with :with) {?view-alias  {:from (m/scan [?table-alias _])}
                                                    ?table-alias _}}
                           [?view-alias ?table-alias]
 
                           {(m/or ::bq/with :with) {?table-alias _}
-                           :from                  [[?table-alias _]]}
-                          [nil ?table-alias])))
+                           :from                  (m/scan [?table-alias _])}
+                          [nil ?table-alias]
+
+                          {(m/or ::bq/with :with) {_ ?query}}
+                          (m/cata ?query)
+
+                          (m/pred (partial instance? SqlCall) {:args (m/scan ?expr)})
+                          (m/cata ?expr))))
             (dep/topo-sort))))
 
 (defn reverse-optimize-honey [optimized-honey]
@@ -281,14 +305,14 @@
       (simplify)
       (sql/format)))
 
-(defn push-down [normalized-honey]
+(defn push-down [normalized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
   (loop [optimized-honey (optimize-honey normalized-honey)
          prev nil]
     (if (= prev optimized-honey)
       (reverse-optimize-honey optimized-honey)
       (recur (incorporate-cols
                optimized-honey
-               (cols-to-push-down optimized-honey))
+               (cols-to-push-down optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col))
              optimized-honey))))
 
 (deftest optimized-honey
@@ -430,13 +454,13 @@
   (is (= {:select [[:a :a]]}
          (-> {:select [:a]}
              (normalize-honey identity)
-             (push-down)
+             (push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
              (simplify))))
 
   (is (= {:select [[:a :a]] :from [[:t :t]]}
          (-> {:select [:a] :from [:t]}
              (normalize-honey identity)
-             (push-down)
+             (push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
              (simplify))))
 
   (is (= '{:select [(:a :a)],
@@ -447,7 +471,7 @@
                        [{:select [] :from [:z]} :y]]
               :select [:a] :from [:x]}
              (normalize-honey identity)
-             (push-down)
+             (push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
              (simplify))))
 
   (is (= {:select [[(sql/call "WINDOW"
@@ -466,7 +490,7 @@
                                                       (sql/inline "CURRENT ROW")]}) :alias]]
               :from   [:v]}
              (normalize-honey identity)
-             (push-down)
+             (push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
              (simplify))))
 
   (is (= #{[:a :t] [:c :t] [:b :t] [:inner :s]}
@@ -475,20 +499,20 @@
                        [{:select [:inner] :from [:s]} :select-alias]] :from [:t]}
              (normalize-honey identity)
              (optimize-honey)
-             (cols-to-push-down))))
+             (cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))))
 
   (is (= #{[:a :t] [:a :s]}
          (-> {:select [:a] :from [[{:select [:a] :from [:s]} :t]]}
              (normalize-honey identity)
              (optimize-honey)
-             (cols-to-push-down))))
+             (cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))))
 
   (is (= #{[:b :t] [:a :v]}
          (-> {:with   [[{:select [:b] :from [:t]} :v]]
               :select [:a] :from [:v]}
              (normalize-honey identity)
              (optimize-honey)
-             (cols-to-push-down)))))
+             (cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))))))
 
 (deftest topo-sorts
   (is (= [] (-> {:select [] :from [:v]}
@@ -517,28 +541,66 @@
                      (topo-sort)))))
 
 (comment
-  (-> {::bq/with [#_[{:select [:e :o]
-                      :from   [[(sql/call "UNNEST" (sql/call "ARRAY"
-                                                             (sql/call "STRUCT" ["Stage" :e] [0 :o])
-                                                             (sql/call "STRUCT" ["Flow" :e] [1 :o])
-                                                             (sql/call "STRUCT" ["Flow Name" :e] [2 :o])
-                                                             (sql/call "STRUCT" ["Child Count" :e] [3 :o])))
-                                :ordering]]}
-                     :event-ordering]
-                  [{:select [] :from [:t]} :v]]
-       :select   [[(sql/call "WINDOW" (sql/call "IGNORE_NULLS" (sql/call "LAST_VALUE" :attributes/stageName))
-                             {::bq/partition-by [:attributes/caseId]
-                              :order-by         [:timestamp {:select [:o]
-                                                               :from   [:event-ordering]
-                                                               :where  [:= :entity-projected-data/event :e]}]
-                              ::bq/rows-between [(sql/inline "UNBOUNDED PRECEDING")
-                                                 (sql/inline "CURRENT ROW")]})
-                   :event]]
-       :where    [:and
-                  [:= "Stage" :event]                       ; important to preserve :event push down
-                  [:<> nil :attributes/caseId]
-                  [:<> "" :attributes/caseId]]
-       :from     [:v]}
+  {::bq/with [[{:select [:e :o]
+                :from   [[(sql/call "UNNEST" (sql/call "ARRAY"
+                                                       (sql/call "STRUCT" ["Stage" :e] [0 :o])
+                                                       (sql/call "STRUCT" ["Flow" :e] [1 :o])
+                                                       (sql/call "STRUCT" ["Flow Name" :e] [2 :o])
+                                                       (sql/call "STRUCT" ["Child Count" :e] [3 :o])))
+                          :ordering]]}
+               :event-ordering]
+              [{:select [] :from [:t]} :v]]
+   :select   [[(sql/call "WINDOW" (sql/call "IGNORE_NULLS" (sql/call "LAST_VALUE" :attributes/stageName))
+                         {::bq/partition-by [:attributes/caseId]
+                          :order-by         [:timestamp {:select [:o]
+                                                         :from   [:event-ordering]
+                                                         :where  [:= :entity-projected-data/event :e]}]
+                          ::bq/rows-between [(sql/inline "UNBOUNDED PRECEDING")
+                                             (sql/inline "CURRENT ROW")]})
+               :event]]
+   :where    [:and
+              [:= "Stage" :event]                           ; important to preserve :event push down
+              [:<> nil :attributes/caseId]
+              [:<> "" :attributes/caseId]]
+   :from     [:v]})
+
+(defn echo [v]
+  (println v) v)
+
+(defn table-deps [optimized-honey]
+  (m/rewrite optimized-honey
+    (m/and
+      {(m/or :with ::bq/with) ?m}
+      {:from (m/gather (m/and [!table-expr _]
+                              [(m/pred (partial contains? ?m)) _]))})
+    [[nil !table-expr] ...]
+
+    {(m/or :with ::bq/with) {?d          _
+                             ?table-expr {:from [[(m/and ?d !dep-table-expr) _] ...]}}}
+    [[?table-expr !dep-table-expr] ...]
+
+    (m/and
+      {(m/and (m/or :with ::bq/with) ?with) ?ctes}
+      (m/or {:select (m/gather [_ (m/pred map? !expr)])}
+            {:from (m/gather [(m/pred map? !expr) _])}
+            {:where (m/pred map? !expr)}
+            {:group-by (m/gather [(m/pred map? !expr)])}
+            {:having (m/gather [(m/pred map? !expr)])}
+            {:order-by (m/gather [(m/pred map? !expr) _])}
+            {::bq/partition-by (m/gather (m/pred map? !expr))}))
+    [(m/cata (m/app assoc !expr ?with ?ctes)) ...]
+
+    {(m/and (m/or :with ::bq/with) ?with) ?ctes
+     :op                                  _ :args (m/gather (m/pred map? !expr))}
+    [(m/cata (m/app assoc !expr ?with ?ctes)) ...]
+
+    _ []))
+
+(comment
+  (-> {:with   [[{:select [] :from [:t]} :v]
+                [{:select [] :from [:v]} :u]]
+       :select [:a #_[(sql/call "FIRST_VALUE" {:select [:b] :from [:u]}) :c]]
+       :from   [:v]}
       (normalize-honey identity)
       (optimize-honey)
-      (cols-to-push-down)))
+      (table-deps)))
