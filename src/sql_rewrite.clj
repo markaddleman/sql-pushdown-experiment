@@ -7,12 +7,15 @@
             [honeysql.core :as h])
   (:import [honeysql.types SqlCall]))
 
-; support windowing clause
+; push down already fully qualified columns
 
 (def simplify
   (m*/bottom-up
     (m*/until =
       (m*/rewrite
+        {:select [] & ?rest}
+        {& ?rest}
+
         {:from [] & ?rest}
         {& ?rest}
 
@@ -28,10 +31,16 @@
         {:order-by [] & ?rest}
         {& ?rest}
 
-        {:limit nil :offset nil :as ?query}
+        {::bq/partition-by [] & ?rest}
+        {& ?rest}
+
+        {::bq/rows-between [] & ?rest}
+        {& ?rest}
+
+        {(m/some :limit) nil (m/some :offset) nil :as ?query}
         (m/app #(dissoc % :limit :offset) ?query)
 
-        {:offset nil :as ?query}
+        {(m/some :offset) nil :as ?query}
         (m/app #(dissoc % :offset) ?query)))))
 
 (declare normalize-honey)
@@ -40,6 +49,9 @@
       (m/rewrite
         {(m/some :select) _ :as ?honey}
         (m/app #(normalize-honey % alias) ?honey)
+
+        {(m/or :order-by ::bq/partition-by ::bq/rows-between) _ :as ?windowing-clause}
+        (m/app #(normalize-honey % alias) ?windowing-clause)
 
         (m/and (m/pred (partial instance? SqlCall))
                {:name ?name :args (m/seqable !arg ...)})
@@ -70,31 +82,40 @@
         {?with [[(m/app #(normalize-expr % alias) !query) (m/app alias !query-alias)] ...]
          &     (m/cata ?rest)}
 
-        {:select   (m/and (m/gather (m/seqable !col-expr-with-alias !col-expr-alias))
-                          (m/gather (m/and (m/not (m/seqable _ _))
-                                           (m/and !col-expr-no-alias-1
-                                                  !col-expr-no-alias-2))))
-         :from     (m/and (m/gather (m/seqable !table-expr-with-alias !table-expr-alias))
-                          (m/gather (m/and (m/not (m/seqable _ _))
-                                           (m/and !table-expr-no-alias-1
-                                                  !table-expr-no-alias-2))))
-         :where    (m/or (m/some ?where-expr)
-                         (m/let [?where-expr true]))
-         :group-by (m/seqable !group-by-expr ...)
-         :having   (m/seqable !having-expr ...)
-         :order-by (m/seqable !order-by-expr ...)
-         :limit    ?limit
-         :offset   ?offset}
-        {:select   [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
-                    [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
-         :from     [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
-                    [(m/app #(normalize-expr % alias) !table-expr-no-alias-1) (m/app alias !table-expr-no-alias-2)] ...]
-         :where    (m/app #(normalize-expr % alias) ?where-expr)
-         :group-by [(m/app #(normalize-expr % alias) !group-by-expr) ...]
-         :having   [(m/app #(normalize-expr % alias) !having-expr) ...]
-         :order-by [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]
-         :limit    ?limit
-         :offset   ?offset})))
+        {:select           (m/and (m/gather (m/seqable !col-expr-with-alias !col-expr-alias))
+                                  (m/gather (m/and (m/not (m/seqable _ _))
+                                                   (m/and !col-expr-no-alias-1
+                                                          !col-expr-no-alias-2))))
+         :from             (m/and (m/gather (m/seqable !table-expr-with-alias !table-expr-alias))
+                                  (m/gather (m/and (m/not (m/seqable _ _))
+                                                   (m/and !table-expr-no-alias-1
+                                                          !table-expr-no-alias-2))))
+         :where            (m/or (m/some ?where-expr)
+                                 (m/let [?where-expr true]))
+         :group-by         (m/seqable !group-by-expr ...)
+         :having           (m/seqable !having-expr ...)
+         :order-by         (m/seqable !order-by-expr ...)
+         :limit            ?limit
+         :offset           ?offset
+
+         ; windowing clause entries
+         ::bq/partition-by (m/seqable !partition-expr ...)
+         ::bq/rows-between (m/seqable !rows-between-expr ...)}
+        {:select           [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
+                            [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
+         :from             [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
+                            [(m/app #(normalize-expr % alias) !table-expr-no-alias-1) (m/app alias !table-expr-no-alias-2)] ...]
+         :where            (m/app #(normalize-expr % alias) ?where-expr)
+         :group-by         [(m/app #(normalize-expr % alias) !group-by-expr) ...]
+         :having           [(m/app #(normalize-expr % alias) !having-expr) ...]
+         :order-by         [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]
+         :limit            ?limit
+         :offset           ?offset
+
+         ; windowing clause entries
+         ::bq/partition-by [(m/app #(normalize-expr % alias) !partition-expr) ...]
+         ::bq/rows-between [!rows-between-expr ...]
+         })))
 
 (comment
   (-> {:select [:a
@@ -141,14 +162,14 @@
           &                               ?query}
          [(m/cata !view) ... (m/cata ?query)]
 
-         {(m/some :select) (m/map-of _ !expr)
-          :from            (m/and [[_ ?table-alias]]
-                                  (m/gather [(m/and {(m/some :select) _}
-                                                    !query) _]))
-          :where           ?where-expr
-          :group-by        [!group-by-expr ...]
-          :having          [!having-expr ...]
-          :order-by        [[!order-by-expr _] ...]}
+         {:select   (m/map-of _ !expr)
+          :from     (m/and [[_ ?table-alias]]
+                           (m/gather [(m/and {(m/some :select) _}
+                                             !query) _]))
+          :where    ?where-expr
+          :group-by [!group-by-expr ...]
+          :having   [!having-expr ...]
+          :order-by [[!order-by-expr _] ...]}
          [(m/cata [?where-expr ?table-alias])
           [(m/cata [!expr ?table-alias]) ...
            (m/cata !query) ...
@@ -161,6 +182,12 @@
 
          [{(m/some :select) _ :as ?query} _]
          (m/cata ?query)
+
+         [{:order-by         [[!order-by-expr _] ...]
+           ::bq/partition-by [!partition-expr ...]} ?table-alias]
+         [(m/cata [!order-by-expr ?table-alias]) ...
+          (m/cata [!partition-expr ?table-alias]) ...]
+
 
          [{:args (m/seqable !expr ...)} ?table-alias]
          [(m/cata [!expr ?table-alias]) ...]
@@ -336,35 +363,46 @@
   (is (= {:select [[:a :a]] :from [[:t :t]] :limit 10}
          (-> {:select [:a] :from [:t] :limit 10}
              (normalize-honey identity)
+             (simplify))))
+
+  (is (= {:select [[#sql/call["WINDOW"
+                              #sql/call["LAST_VALUE" :col]
+                              {:bq/rows-between [#sql/inline"UNBOUNDED PRECEDING" #sql/inline"CURRENT ROW"],
+                               :order-by        [[:timestamp :asc]],
+                               :bq/partition-by [:caseId]}]
+                    :alias]]
+          :from   [[:t :t]]}
+         (-> {:select [[(h/call "WINDOW" (h/call "LAST_VALUE" :col)
+                                {::bq/partition-by [:caseId]
+                                 :order-by         [:timestamp]
+                                 ::bq/rows-between [(h/inline "UNBOUNDED PRECEDING")
+                                                    (h/inline "CURRENT ROW")]}) :alias]]
+              :from   [:t]}
+             (normalize-honey identity)
              (simplify)))))
 
 (deftest normalize-from-exprs
-  (is (= {:select []
-          :from   [[:a :a]]}
+  (is (= {:from [[:a :a]]}
          (-> {:from [[:a :a]]}
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select []
-          :from   [[:a :a]]}
+  (is (= {:from [[:a :a]]}
          (-> {:from [:a]}
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select []
-          :from   [[:a :a] [:b :b]]}
+  (is (= {:from [[:a :a] [:b :b]]}
          (-> {:from [:a :b]}
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select []
-          :from   [[:b :c] [:a :a]]}
+  (is (= {:from [[:b :c] [:a :a]]}
          (-> {:from [:a [:b :c]]}
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:select []
-          :from   [[:a :b] [:b :c]]}
+  (is (= {:from [[:a :b] [:b :c]]}
          (-> {:from [[:a :b] [:b :c]]}
              (normalize-honey identity)
              (simplify)))))
@@ -429,6 +467,25 @@
               :select [:a] :from [:x]}
              (normalize-honey identity)
              (push-down)
+             (simplify))))
+
+  (is (= {:select [[#sql/call["WINDOW"
+                              #sql/call["LAST_VALUE" :col]
+                              {:bq/rows-between [#sql/inline"UNBOUNDED PRECEDING" #sql/inline"CURRENT ROW"],
+                               :order-by        [[:timestamp :asc]],
+                               :bq/partition-by [:caseId]}]
+                    :alias]],
+          :from   [[:v :v]],
+          :with   [[{:select [[:col :col] [:timestamp :timestamp] [:caseId :caseId]], :from [[:t :t]]} :v]]}
+         (-> {:with   [[{:select [] :from [:t]} :v]]
+              :select [[(h/call "WINDOW" (h/call "LAST_VALUE" :col)
+                                {::bq/partition-by [:caseId]
+                                 :order-by         [:timestamp]
+                                 ::bq/rows-between [(h/inline "UNBOUNDED PRECEDING")
+                                                    (h/inline "CURRENT ROW")]}) :alias]]
+              :from   [:v]}
+             (normalize-honey identity)
+             (push-down)
              (simplify)))))
 
 (deftest topo-sorts
@@ -456,3 +513,6 @@
                      (normalize-honey identity)
                      (optimize-honey)
                      (topo-sort)))))
+
+(comment
+  )
