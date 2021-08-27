@@ -10,38 +10,37 @@
 ; push down already fully qualified columns
 
 (def simplify
-  (m*/bottom-up
-    (m*/until =
-              (m*/rewrite
-                {:select [] & ?rest}
-                {& ?rest}
+  (m*/top-down
+    (m*/until = (m*/rewrite
+                  {:select [] & ?rest}
+                  {& ?rest}
 
-                {:from [] & ?rest}
-                {& ?rest}
+                  {:from [] & ?rest}
+                  {& ?rest}
 
-                {:where true & ?rest}
-                {& ?rest}
+                  {:where true & ?rest}
+                  {& ?rest}
 
-                {:group-by [] & ?rest}
-                {& ?rest}
+                  {:group-by [] & ?rest}
+                  {& ?rest}
 
-                {:having [] & ?rest}
-                {& ?rest}
+                  {:having [] & ?rest}
+                  {& ?rest}
 
-                {:order-by [] & ?rest}
-                {& ?rest}
+                  {:order-by [] & ?rest}
+                  {& ?rest}
 
-                {::bq/partition-by [] & ?rest}
-                {& ?rest}
+                  {::bq/partition-by [] & ?rest}
+                  {& ?rest}
 
-                {::bq/rows-between [] & ?rest}
-                {& ?rest}
+                  {::bq/rows-between [] & ?rest}
+                  {& ?rest}
 
-                {(m/some :limit) nil (m/some :offset) nil :as ?query}
-                (m/app #(dissoc % :limit :offset) ?query)
+                  {(m/some :limit) nil (m/some :offset) nil :as ?query}
+                  (m/app #(dissoc % :limit :offset) ?query)
 
-                {(m/some :offset) nil :as ?query}
-                (m/app #(dissoc % :offset) ?query)))))
+                  {(m/some :offset) nil :as ?query}
+                  (m/app #(dissoc % :offset) ?query)))))
 
 (declare normalize-honey)
 (defn normalize-expr [expr alias]
@@ -152,7 +151,7 @@
          :group-by [!group-by-expr ...]
          :having   [!having-expr ...]
          :order-by [[!order-by-expr !order] ...]}
-        {:select   (m/map-of !col-alias !col-expr)
+        {:select   (m/map-of !col-alias (m/app optimize-expr !col-expr))
          :from     [[(m/app optimize-expr !from-expr) !from-alias] ...]
          :where    (m/app optimize-expr ?where-expr)
          :group-by [(m/app optimize-expr !group-by-expr) ...]
@@ -214,6 +213,14 @@
   (and (keyword? v) (namespace v)))
 
 (def table-name? keyword?)
+
+(comment
+  (-> {:with   [[{:select [] :from [:y]} :x]
+                [{:select [] :from [:z]} :y]]
+       :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:x]}) :c]] :from [:x]}
+      (normalize-honey identity)
+      (optimize-honey)
+      #_(cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))))
 
 (comment
   (-> {:where    true,
@@ -296,16 +303,6 @@
           {:select (m/app (partial into []) ?select-expr)
            :from   (m/app (partial into []) ?from-expr)
            &       ?rest}))))
-
-(comment
-  (-> {:with   [[{:select [:a] :from [:x]} :v]
-                [{:select [:a] :from [:y]} :x]]
-       :select [:a] :from [:v]}
-      (normalize-honey identity)
-      (optimize-honey)
-      (reverse-optimize-honey)
-      (simplify)
-      (sql/format)))
 
 (defn push-down [normalized-honey table-name? qualified-col? unqualified-col? col-table-ref unqualified-col]
   (loop [optimized-honey (optimize-honey normalized-honey)
@@ -495,6 +492,19 @@
              (push-down table-name? qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
              (simplify))))
 
+  (is (= {:select [[(sql/call "FIRST_VALUE" {:from [[:x :x]], :select [[:b :b]]}) :c] (:a :a)],
+          :from   [[:x :x]],
+          :with   [[{:select [[:a :a] [:b :b]],
+                     :from   [[:z :z]]} :y]
+                   [{:select [[:a :a] [:b :b]],
+                     :from   [[:y :y]]} :x]]}
+         (-> {:with   [[{:select [] :from [:y]} :x]
+                       [{:select [] :from [:z]} :y]]
+              :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:x]}) :c]] :from [:x]}
+             (normalize-honey identity)
+             (push-down table-name? qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+             (simplify))))
+
   (is (= #{[:a :t] [:c :t] [:b :t] [:inner :s]}
          (-> {:select [:a
                        [(sql/call "and" (sql/call "=" :a :c) :b) :alias]
@@ -567,15 +577,11 @@
    :from     [:v]})
 
 (comment
-  (table-deps {:with   {:c {:select [] :from []}
-                        :b {:select [] :from [[:c :c]]}
-                        :a {:select [] :from [[:b :b]]}}
-               :select [[{:select [] :from [[:b :b]]} :alias]] :from [[:a :a]]}
-              keyword?)
-  (-> {:with   [[{:select [] :from [:physical]} :t]
-                [{:select [] :from [:t]} :v]
-                [{:select [] :from [:v]} :u]]
-       :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:u]}) :c]]}
-      (normalize-honey identity)
-      (optimize-honey)
-      (table-deps keyword?)))
+  (time (dotimes [_ 1000]
+          (-> {:with   [[{:select [] :from [:physical]} :t]
+                        [{:select [] :from [:t]} :v]
+                        [{:select [] :from [:v]} :u]]
+               :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:u]}) :c]]}
+              (normalize-honey identity)
+              (push-down table-name? qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+              (simplify)))))
