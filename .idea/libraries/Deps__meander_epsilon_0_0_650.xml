@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="Deps: meander/epsilon:0.0.650">
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/meander/epsilon/0.0.650/epsilon-0.0.650.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>
