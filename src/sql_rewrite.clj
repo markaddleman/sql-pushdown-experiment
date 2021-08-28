@@ -1,6 +1,5 @@
 (ns sql-rewrite
   (:require [meander.epsilon :as m]
-            [meander.strategy.epsilon :as m*]
             [bq :as bq]
             [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
@@ -9,40 +8,26 @@
 
 ; push down already fully qualified columns
 
+(defn unqualified-col? [v]
+  (and (keyword? v) (not (namespace v))))
+
+(defn qualified-col? [v]
+  (and (keyword? v) (namespace v)))
+
+(def table-name? keyword?)
+
 (defn remove-unused-clauses [normalized-honey]
-  (-> normalized-honey
-      (m/rewrite
-        {:select [] & ?rest}
-        (m/cata {& ?rest})
-
-        {:from [] & ?rest}
-        (m/cata {& ?rest})
-
-        {:where true & ?rest}
-        (m/cata {& ?rest})
-
-        {:group-by [] & ?rest}
-        (m/cata {& ?rest})
-
-        {:having [] & ?rest}
-        (m/cata {& ?rest})
-
-        {:order-by [] & ?rest}
-        (m/cata {& ?rest})
-
-        {(m/some :limit) nil & ?rest}
-        (m/cata {& ?rest})
-
-        {(m/some :offset) nil & ?rest}
-        (m/cata {& ?rest})
-
-        {::bq/rows-between [] & ?rest}
-        (m/cata {& ?rest})
-
-        {::bq/partition-by [] & ?rest}
-        (m/cata {& ?rest})
-
-        ?? ??)))
+  (into {} (filter (complement #{[:select []]
+                                 [:from []]
+                                 [:where true]
+                                 [:group-by []]
+                                 [:having []]
+                                 [:order-by []]
+                                 [:limit nil]
+                                 [:offset nil]
+                                 [::bq/rows-between []]
+                                 [::bq/partition-by []]}))
+        normalized-honey))
 
 (defn simplify [normalized-honey]
   (-> normalized-honey
@@ -210,60 +195,72 @@
          ::bq/partition-by [(m/app optimize-expr !partition-by-expr) ...]})))
 
 (defn cols-to-push-down [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
-  (->> (m/rewrite optimized-honey
-         {(m/some (m/or ::bq/with :with)) (m/map-of !view-name !view)
-          &                               ?query}
-         [(m/cata !view) ... (m/cata ?query)]
+  (m/rewrite [optimized-honey nil]
+    [{:select           (m/map-of _ !expr)
+      :from             [[?table-expr ?table-alias] & _]
+      :where            (m/or (m/pred (complement true?) !expr)
+                              (m/let [[!expr ...] []]))
+      :group-by         [!expr ...]
+      :having           [!expr ...]
+      :order-by         [[!expr _] ...]
+      :limit            (m/or (m/pred (complement nil?) !expr)
+                              (m/let [[!expr ...] []]))
+      :offset           (m/or (m/pred (complement nil?) !expr)
+                              (m/let [[!expr ...] []]))
+      ::bq/partition-by [!expr ...]
+      ::bq/rows-between [!expr ...]} ?dest]
+    [(m/cata [!expr [[?table-alias ?table-expr] ?dest]]) ...]
 
-         {:select   (m/map-of _ !expr)
-          :from     (m/and [[_ ?table-alias]]
-                           (m/gather [(m/and {(m/some :select) _}
-                                             !query) _]))
-          :where    ?where-expr
-          :group-by [!group-by-expr ...]
-          :having   [!having-expr ...]
-          :order-by [[!order-by-expr _] ...]}
-         [(m/cata [?where-expr ?table-alias])
-          [(m/cata [!expr ?table-alias]) ...
-           (m/cata !query) ...
-           (m/cata [!group-by-expr ?table-alias]) ...
-           (m/cata [!having-expr ?table-alias]) ...
-           (m/cata [!order-by-expr ?table-alias]) ...]]
+    [(m/and (m/pred (partial instance? SqlCall) ?call)
+            {:args (m/seqable !arg ...)}) ?table-alias]
+    [(m/cata [!arg [?table-alias]]) ...]
 
-         [(m/pred (partial instance? SqlCall) {:args (m/seqable !arg ...)}) ?table-alias]
-         [(m/cata [!arg ?table-alias]) ...]
+    #_[{(m/some :select) _ :as ?inner-query} ?table-alias]
+    #_(m/cata [?inner-query ?table-alias])
 
-         [{(m/some :select) _ :as ?query} _]
-         (m/cata ?query)
+    #_[[[(m/and !expr-1 !expr-2) !outer-table-alias] ...] {:from [[_ ?inner-table-alias] & _]}]
+    #_[[!expr-1 !outer-table-alias] ... [!expr-2 ?inner-table-alias] ...]
 
-         [{:order-by         [[!order-by-expr _] ...]
-           ::bq/partition-by [!partition-expr ...]} ?table-alias]
-         [(m/cata [!order-by-expr ?table-alias]) ...
-          (m/cata [!partition-expr ?table-alias]) ...]
+    [(m/and (m/pred qualified-col? ?col)
+            (m/let [?col-table-ref (col-table-ref ?col)
+                    ?unqualified-col (unqualified-col ?col)]))
+     (m/and [[?col-table-ref _] & _] ?dest)]
+    [?unqualified-col ?dest]
 
+    [(m/and (m/pred qualified-col? ?col)
+            (m/let [?col-table-ref (col-table-ref ?col)
+                    ?unqualified-col (unqualified-col ?col)]))
+     (m/and [[?col-table-ref _] & _] ?dest)]
+    [?unqualified-col ?dest]
 
-         [{:args (m/seqable !expr ...)} ?table-alias]
-         [(m/cata [!expr ?table-alias]) ...]
+    [?expr ?table-alias]
+    [?expr ?table-alias]))
 
-         [(m/pred unqualified-col? ?col) ?table-alias]
-         [?col ?table-alias]
+(comment
+  #_{:select [:a] :from [[:t :v]]}
+  #_{:select [:v/a] :from [[:t :v]]}
+  #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
+  #_{:select [[(sql/call "count" :a) :count-a]] :from [[{:select [] :from [:t]} :v]]}
+  #_{:select [:a]
+     :from   [[:t :outer]]
+     :where  (sql/call "exists" {:select [1]
+                                 :from   [[:t :inner]]
+                                 :where  [:= :outer/k :inner/k]})}
+  #_{:select [:a]
+     :from   [[:t :outer]]
+     :where  [:= :k {:select [[(sql/call "MAX" :b) :max-b]]
+                     :from   [[:t :inner]]}]}
+  #_{:with   [[{:select [] :from [:physical]} :t]]
+     :select [:a]
+     :from   [[:t :outer]]
+     :where  [:= :k {:select [[(sql/call "MAX" :b) :max-b]]
+                     :from   [[:t :inner]]
+                     :where  [:= :inner/k :outer/k]}]}
 
-         [(m/pred qualified-col? ?col) ?table-alias]
-         [(m/app unqualified-col ?col) (m/app col-table-ref ?col)]
-
-         [(m/pred constant? ?expr) ?table-alias]
-         [])
-       (flatten)
-       (partition 2)
-       (set)))
-
-(defn unqualified-col? [v]
-  (and (keyword? v) (not (namespace v))))
-
-(defn qualified-col? [v]
-  (and (keyword? v) (namespace v)))
-
-(def table-name? keyword?)
+  (-> {:select [:v/a] :from [[:t :v]]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (cols-to-push-down qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))))
 
 (defn incorporate-col [col select-expr]
   (merge {col col} select-expr))
@@ -271,16 +268,16 @@
 (defn incorporate-cols [optimized-honey cols]
   (reduce (fn [optimized-honey [col table-alias]]
             (m/rewrite optimized-honey
-                       {(m/and (m/or ::bq/with :with) ?with) {~table-alias {:select ?select-expr
-                                                                            &       ?rest-view}
-                                                              &            ?rest-with}
-                        &                                    ?rest-query}
-                       {?with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
-                                             &       ?rest-view}
-                               &            ?rest-with}
-                        &     ?rest-query}
+              {(m/and (m/or ::bq/with :with) ?with) {~table-alias {:select ?select-expr
+                                                                   &       ?rest-view}
+                                                     &            ?rest-with}
+               &                                    ?rest-query}
+              {?with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
+                                    &       ?rest-view}
+                      &            ?rest-with}
+               &     ?rest-query}
 
-                       ?? ??))
+              ?? ??))
           optimized-honey
           cols))
 
@@ -468,6 +465,13 @@
                                                       (sql/inline "CURRENT ROW")]}) :alias]]
               :from   [:t]}
              (normalize-honey identity)
+             (simplify))))
+
+  (is (= {:where (sql/call "=" :inner/a :outer/a), :from [[:t :inner]], :select [[(sql/call "MAX" :b) :max-b]]}
+         (-> {:select [[(sql/call "MAX" :b) :max-b]]
+              :from   [[:t :inner]]
+              :where  [:= :inner/a :outer/a]}
+             (normalize-honey identity)
              (simplify)))))
 
 (deftest normalize-from-exprs
@@ -640,7 +644,7 @@
    :from     [:v]})
 
 (comment
-  (time (dotimes [_ 1000]
+  (time (dotimes [_ 10000]
           (-> {:with   [[{:select [] :from [:physical]} :t]
                         [{:select [] :from [:t]} :v]
                         [{:select [] :from [:v]} :u]]
