@@ -9,38 +9,77 @@
 
 ; push down already fully qualified columns
 
-(def simplify
-  (m*/top-down
-    (m*/until = (m*/rewrite
-                  {:select [] & ?rest}
-                  {& ?rest}
+(defn remove-unused-clauses [normalized-honey]
+  (-> normalized-honey
+      (m/rewrite
+        {:select [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {:from [] & ?rest}
-                  {& ?rest}
+        {:from [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {:where true & ?rest}
-                  {& ?rest}
+        {:where true & ?rest}
+        (m/cata {& ?rest})
 
-                  {:group-by [] & ?rest}
-                  {& ?rest}
+        {:group-by [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {:having [] & ?rest}
-                  {& ?rest}
+        {:having [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {:order-by [] & ?rest}
-                  {& ?rest}
+        {:order-by [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {::bq/partition-by [] & ?rest}
-                  {& ?rest}
+        {(m/some :limit) nil & ?rest}
+        (m/cata {& ?rest})
 
-                  {::bq/rows-between [] & ?rest}
-                  {& ?rest}
+        {(m/some :offset) nil & ?rest}
+        (m/cata {& ?rest})
 
-                  {(m/some :limit) nil (m/some :offset) nil :as ?query}
-                  (m/app #(dissoc % :limit :offset) ?query)
+        {::bq/rows-between [] & ?rest}
+        (m/cata {& ?rest})
 
-                  {(m/some :offset) nil :as ?query}
-                  (m/app #(dissoc % :offset) ?query)))))
+        {::bq/partition-by [] & ?rest}
+        (m/cata {& ?rest})
+
+        ?? ??)))
+
+(defn simplify [normalized-honey]
+  (-> normalized-honey
+      (m/rewrite
+        {(m/and (m/or ::bq/with :with) ?with) [[!table-expr !table-alias] ...]
+         &                                    ?rest}
+        {?with [[(m/cata !table-expr) !table-alias] ...]
+         &     (m/cata ?rest)}
+
+        {:select           [[!col-expr !col-alias] ...]
+         :from             [[!table-expr !table-alias] ...]
+         :where            ?where-expr
+         :group-by         [!group-by-expr ...]
+         :having           [!having-expr ...]
+         :order-by         [[!order-by-expr !ordering] ...]
+         :limit            ?limit-expr
+         :offset           ?offset-expr
+         ::bq/rows-between [!rows-between-expr ...]
+         ::bq/partition-by [!partition-by-expr ...]}
+
+        (m/app remove-unused-clauses
+               {:select           [[(m/cata !col-expr) !col-alias] ...]
+                :from             [[(m/cata !table-expr) !table-alias] ...]
+                :where            (m/cata ?where-expr)
+                :group-by         [(m/cata !group-by-expr) ...]
+                :having           [(m/cata !having-expr) ...]
+                :order-by         [[(m/cata !order-by-expr) !ordering] ...]
+                :limit            (m/cata ?limit-expr)
+                :offset           (m/cata ?offset-expr)
+                ::bq/rows-between [(m/cata !rows-between-expr) ...]
+                ::bq/partition-by [(m/cata !partition-by-expr) ...]})
+
+        (m/and (m/pred (partial instance? SqlCall) ?call)
+               {:args (m/seqable !arg ...)})
+        (m/app assoc ?call :args (m/seqable (m/cata !arg) ...))
+
+        ?? ??)))
 
 (declare normalize-honey)
 (defn normalize-expr [expr alias]
@@ -117,6 +156,12 @@
          ; windowing clause entries
          ::bq/partition-by [(m/app #(normalize-expr % alias) !partition-expr) ...]
          ::bq/rows-between [!rows-between-expr ...]})))
+
+(comment
+  (-> {:select [[{:select [[:a :a]] :from []} :a]]
+       :from   []}
+      (normalize-honey identity)
+      (simplify)))
 
 (def constant? (comp (some-fn #{Boolean Long String} nil?) (partial class)))
 
@@ -331,16 +376,18 @@
       (simplify)))
 
 (deftest optimized-honey
-  (is (= {:select {:a :a, :b :b}, :from [[:t :t]]}
+  (is (= {:from [[:t :t]], :select [[:a :a] [:b :b]]}
          (-> {:select [:a :b] :from [:t]}
              (normalize-honey identity)
              (optimize-honey)
+             (reverse-optimize-honey table-name?)
              (simplify))))
 
-  (is (= {:select {:a-alias :a, :b-alias :b}, :from [[:t :t-alias]]}
+  (is (= {:from [[:t :t-alias]], :select [[:a :a-alias] [:b :b-alias]]}
          (-> {:select [[:a :a-alias] [:b :b-alias]] :from [[:t :t-alias]]}
              (normalize-honey identity)
              (optimize-honey)
+             (reverse-optimize-honey table-name?)
              (simplify)))))
 
 (deftest normalize-select-exprs
@@ -450,19 +497,21 @@
              (simplify)))))
 
 (deftest sub-selects
-  (is (= {:select {:alias {:select {:a :a, :b :b}, :from [[{:select {:a :a}, :from [[:t :t]]} :t]]}}}
+  (is (= {:select [[{:from [[{:from [[:t :t]], :select [[:a :a]]} :t]], :select [[:a :a] [:b :b]]} :alias]]}
          (-> {:select [[{:select [:a :b] :from [[{:select [:a] :from [:t]} :t]]} :alias]]}
              (normalize-honey identity)
              (optimize-honey)
+             (reverse-optimize-honey table-name?)
              (simplify)))))
 
 (deftest with-clause
-  (is (= {:select {:a 1}, :from [[:v :v]], :with {:v {:select {:a :a}, :from [[:t :t]]}}}
+  (is (= {:from [[:v :v]], :select [[1 :a]], :with [[{:from [[:t :t]], :select [[:a :a]]} :v]]}
          (-> {:with   [[{:select [:a] :from [:t]} :v]]
               :select [[1 :a]]
               :from   [:v]}
              (normalize-honey identity)
              (optimize-honey)
+             (reverse-optimize-honey table-name?)
              (simplify)))))
 
 (deftest push-downs
