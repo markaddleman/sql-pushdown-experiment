@@ -1,5 +1,6 @@
 (ns sql-rewrite
   (:require [meander.epsilon :as m]
+            [net.cgrand.xforms :as x]
             [bq :as bq]
             [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
@@ -194,61 +195,78 @@
          ::bq/rows-between [(m/app optimize-expr !rows-between-expr) ...]
          ::bq/partition-by [(m/app optimize-expr !partition-by-expr) ...]})))
 
+(defn my-group-by [kfn vals-fn coll]
+  (into {} (x/by-key kfn vals-fn (x/into []))
+        coll))
+
 (defn cols-to-push [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
-  (m/rewrite [optimized-honey [::query] {} []]
-    #_#_[{(m/or ::bq/with :with) [[!query !query-alias] ...]} ?location ?alias->location ?cols-to-push]
-        [(m/cata [!query [!query-alias & ?location] ?alias->location ?cols-to-push]) ...]
+  (my-group-by second
+               first
+               (-> [optimized-honey [::query] {} []]
+                   (m/rewrite
+                     [{(m/or ::bq/with :with) [[!query !query-alias] ...]} ?location ?alias->location ?cols-to-push]
+                     [(m/cata [!query [!query-alias & ?location] ?alias->location ?cols-to-push]) ...]
 
-    [{:select           (m/map-of _ !expr)
-      :from             (m/and [[?table-expr ?table-alias] & _]
-                               (m/gather [{(m/some :select) _ :as !table-expr} !table-alias]))
-      :where            (m/or (m/pred (complement true?) !expr)
-                              (m/let [[!expr ...] []]))
-      :group-by         [!expr ...]
-      :having           [!expr ...]
-      :order-by         [[!expr _] ...]
-      :limit            (m/or (m/pred (complement nil?) !expr)
-                              (m/let [[!expr ...] []]))
-      :offset           (m/or (m/pred (complement nil?) !expr)
-                              (m/let [[!expr ...] []]))
-      ::bq/partition-by [!expr ...]
-      ::bq/rows-between [!expr ...]}
-     ?location {& ?alias->location} ?cols-to-push]
-    [(m/cata [!expr [?table-expr & ?location]
-              {&            ?alias->location
-               ?table-alias ?location}
-              ?cols-to-push]) ...
-     (m/cata [!table-expr [?table-expr & ?location]
-              {&            ?alias->location
-               ?table-alias ?location}
-              ?cols-to-push]) ...]
+                     [{:select           (m/map-of _ !expr)
+                       :from             (m/and [[?table-expr ?table-alias] & _]
+                                                (m/gather [{(m/some :select) _ :as !table-expr} !table-alias]))
+                       :where            (m/or (m/pred (complement true?) !expr)
+                                               (m/let [[!expr ...] []]))
+                       :group-by         [!expr ...]
+                       :having           [!expr ...]
+                       :order-by         [[!expr _] ...]
+                       :limit            (m/or (m/pred (complement nil?) !expr)
+                                               (m/let [[!expr ...] []]))
+                       :offset           (m/or (m/pred (complement nil?) !expr)
+                                               (m/let [[!expr ...] []]))
+                       ::bq/partition-by [!expr ...]
+                       ::bq/rows-between [!expr ...]}
+                      ?location {& ?alias->location} ?cols-to-push]
+                     [(m/cata [!expr [?table-expr & ?location]
+                               {&            ?alias->location
+                                ?table-alias [?table-expr & ?location]}
+                               ?cols-to-push]) ...
+                      (m/cata [!table-expr [?table-expr & ?location]
+                               {&            ?alias->location
+                                ?table-alias [?table-expr & ?location]}
+                               ?cols-to-push]) ...]
 
-    [(m/and (m/pred (partial instance? SqlCall) ?call)
-            {:args (m/seqable !arg ...)})
-     ?location ?alias->location ?cols-to-push]
-    [(m/cata [!arg ?location ?alias->location ?cols-to-push]) ...]
+                     [(m/and (m/pred (partial instance? SqlCall) ?call)
+                             {:args (m/seqable !arg ...)})
+                      ?location ?alias->location ?cols-to-push]
+                     [(m/cata [!arg ?location ?alias->location ?cols-to-push]) ...]
 
-    [(m/and (m/pred qualified-col? ?qualified-col)
-            (m/let [?table-alias (col-table-ref ?qualified-col)
-                    ?col (unqualified-col ?qualified-col)]))
-     ?location ?alias->location ?cols-to-push]
-    [[?col (m/app get ?alias->location ?table-alias)] & ?cols-to-push]
+                     [(m/and (m/pred qualified-col? ?qualified-col)
+                             (m/let [?table-alias (col-table-ref ?qualified-col)
+                                     ?col (unqualified-col ?qualified-col)]))
+                      ?location ?alias->location ?cols-to-push]
+                     [[?col (m/app get ?alias->location ?table-alias)] & ?cols-to-push]
 
-    [(m/pred constant? _) _ _ _]
-    nil
+                     [(m/pred constant? _) _ _ _]
+                     []
 
-    [?col ?location ?alias->location ?cols-to-push]
-    [[?col ?location] & ?cols-to-push]))
+                     [?col ?location ?alias->location ?cols-to-push]
+                     [[?col ?location] & ?cols-to-push])
+                   (m/rewrite
+                     [(m/pred unqualified-col? ?col) ?location]
+                     [[?col ?location]]
+
+                     [[[] & ?rest]]
+                     (m/cata ?rest)
+
+                     [!element ...]
+                     (m/app (partial apply concat) [(m/cata !element) ...])))))
 
 (comment
-  (-> {:select [:a]
-       :from   [[:t :outer]]
-       :where  (sql/call "exists" {:select [1]
-                                   :from   [[:t :inner]]
-                                   :where  [:= :outer/k-outer :inner/k-inner]})}
-      (normalize-honey identity)
-      (optimize-honey)
-      (cols-to-push qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))
+  (let [optimized-honey (-> {:select [:a]
+                             :from   [[:t :outer]]
+                             :where  (sql/call "exists" {:select [1]
+                                                         :from   [[:t :inner]]
+                                                         :where  [:= :outer/k :inner/k]})}
+                            (normalize-honey identity)
+                            (optimize-honey))]
+    (time (dotimes [_ 10000]
+            (cols-to-push optimized-honey qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))))
 
   #_{:select [:a] :from [[:t :v]]}
   #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
