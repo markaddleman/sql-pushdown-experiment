@@ -4,7 +4,8 @@
             [bq :as bq]
             [weavejester.dependency :as dep]
             [clojure.test :refer [deftest is]]
-            [honeysql.core :as sql])
+            [honeysql.core :as sql]
+            [criterium.core :refer [bench quick-bench]])
   (:import [honeysql.types SqlCall]))
 
 ; push down already fully qualified columns
@@ -196,7 +197,7 @@
          ::bq/partition-by [(m/app optimize-expr !partition-by-expr) ...]})))
 
 (defn my-group-by [kfn vals-fn coll]
-  (into {} (x/by-key kfn vals-fn (x/into []))
+  (into {} (x/by-key kfn vals-fn (x/into #{}))
         coll))
 
 (defn cols-to-push [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
@@ -204,8 +205,10 @@
                first
                (-> [optimized-honey [::query] {} []]
                    (m/rewrite
-                     [{(m/or ::bq/with :with) [[!query !query-alias] ...]} ?location ?alias->location ?cols-to-push]
-                     [(m/cata [!query [!query-alias & ?location] ?alias->location ?cols-to-push]) ...]
+                     [{(m/or ::bq/with :with) (m/map-of !query-alias !query) & ?rest}
+                      ?location ?alias->location ?cols-to-push]
+                     [(m/cata [!query [!query-alias & ?location] ?alias->location ?cols-to-push]) ...
+                      (m/cata [?rest ?location ?alias->location ?cols-to-push])]
 
                      [{:select           (m/map-of _ !expr)
                        :from             (m/and [[?table-expr ?table-alias] & _]
@@ -258,15 +261,15 @@
                      (m/app (partial apply concat) [(m/cata !element) ...])))))
 
 (comment
-  (let [optimized-honey (-> {:select [:a]
-                             :from   [[:t :outer]]
-                             :where  (sql/call "exists" {:select [1]
-                                                         :from   [[:t :inner]]
-                                                         :where  [:= :outer/k :inner/k]})}
-                            (normalize-honey identity)
-                            (optimize-honey))]
-    (time (dotimes [_ 10000]
-            (cols-to-push optimized-honey qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))))
+  (-> {:with   [[{:select [:d] :from [:physical]} :t]]
+       :select [:a]
+       :from   [[:t :outer]]
+       :where  [:= :k {:select [[(sql/call "MAX" :b) :max-b]]
+                       :from   [[:t :inner]]
+                       :where  [:= :inner/k :outer/k]}]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (cols-to-push qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))
 
   #_{:select [:a] :from [[:t :v]]}
   #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
@@ -288,24 +291,60 @@
                      :from   [[:t :inner]]
                      :where  [:= :inner/k :outer/k]}]})
 
-(defn incorporate-col [col select-expr]
-  (merge {col col} select-expr))
-
 (defn incorporate-cols [optimized-honey cols]
-  (reduce (fn [optimized-honey [col table-alias]]
-            (m/rewrite optimized-honey
-              {(m/and (m/or ::bq/with :with) ?with) {~table-alias {:select ?select-expr
-                                                                   &       ?rest-view}
-                                                     &            ?rest-with}
-               &                                    ?rest-query}
-              {?with {~table-alias {:select (m/app (partial incorporate-col col) ?select-expr)
-                                    &       ?rest-view}
-                      &            ?rest-with}
-               &     ?rest-query}
+  (m/rewrite [optimized-honey [::query]]
+    [{(m/and (m/or ::bq/with :with) ?with) (m/map-of (m/and !query-alias-1 !query-alias-2) !query)
+      &                                    ?rest}
+     ?location]
+    {?with (m/map-of !query-alias-1 (m/cata [!query [!query-alias-2 & ?location]]))
+     &     (m/cata [?rest ?location])}
 
-              ?? ??))
-          optimized-honey
-          cols))
+    [{:select           (m/map-of !col-alias !col-expr)
+      :from             (m/and
+                          [[?table-expr ?table-alias] & _]
+                          [[!table-expr !table-alias] ...])
+      :where            ?where-expr
+      :group-by         [!group-by-expr ...]
+      :having           [!having-expr ...]
+      :order-by         [[!order-by-expr !order-by-order] ...]
+      :limit            ?limit-expr
+      :offset           ?offset-expr
+      ::bq/partition-by [!partition-by-expr ...]
+      ::bq/rows-between [!rows-between-expr ...]}
+     ?location]
+    {:select           [?table-expr & ?location]
+     #_(m/app merge
+              (m/app (partial get cols) ?location)
+              (m/map-of !col-alias (m/cata [!col-expr ?location])))
+     :from             [[(m/cata [!table-expr ?location]) !table-alias] ...]
+     :where            (m/cata [?where-expr ?location])
+     :group-by         [(m/cata [!group-by-expr ?location]) ...]
+     :having           [(m/cata [!having-expr ?location]) ...]
+     :order-by         [[(m/cata [!order-by-expr ?location]) !order-by-order] ...]
+     :limit            ?limit-expr
+     :offset           ?offset-expr
+     ::bq/partition-by [(m/cata [!partition-by-expr ?location]) ...]
+     ::bq/rows-between [(m/cata [!rows-between-expr ?location]) ...]}
+
+    [(m/and (m/pred (partial instance? SqlCall) ?call)
+            {:args (m/seqable !arg ...)})
+     ?location ?alias->location ?cols-to-push]
+    [(m/cata [!arg ?location]) ...]
+
+    [?expr ?location]
+    ?expr))
+
+(comment
+  (let [optimized-honey (-> {:with   [[{:select [:d] :from [:physical]} :t]]
+                             :select [:a]
+                             :from   [[:t :outer]]
+                             :where  [:= :k {:select [[(sql/call "MAX" :b) :max-b]]
+                                             :from   [[:t :inner]]
+                                             :where  [:= :inner/k :outer/k]}]}
+                            (normalize-honey identity)
+                            (optimize-honey))
+        cols (cols-to-push optimized-honey qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))]
+    (incorporate-cols optimized-honey cols)))
 
 (defn table-deps [optimized-honey table-name?]
   (partition 2 (-> optimized-honey
