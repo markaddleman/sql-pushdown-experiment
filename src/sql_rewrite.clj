@@ -48,8 +48,6 @@
         {:select           [[!col-expr !col-alias] ...]
          :from             [[!table-expr !table-alias] ...]
          :join             [[!join-expr !join-alias] !join-condition ...]
-         :left-join        [[!left-join-expr !left-join-alias] !left-condition ...]
-         :right-join       [[!right-join-expr !right-join-alias] !right-join-condition ...]
          :where            ?where-expr
          :group-by         [!group-by-expr ...]
          :having           [!having-expr ...]
@@ -62,8 +60,6 @@
                {:select           [[(m/cata !col-expr) !col-alias] ...]
                 :from             [[(m/cata !table-expr) !table-alias] ...]
                 :join             [[(m/cata !join-expr) !join-alias] (m/cata !join-condition) ...]
-                :left-join        [[(m/cata !left-join-expr) !left-join-alias] (m/cata !left-join-condition) ...]
-                :right-join       [[(m/cata !right-join-expr) !right-join-alias] (m/cata !right-join-condition) ...]
                 :where            (m/cata ?where-expr)
                 :group-by         [(m/cata !group-by-expr) ...]
                 :having           [(m/cata !having-expr) ...]
@@ -114,60 +110,50 @@
         (m/app #(normalize-expr % alias) ?expr))))
 
 (defn normalize-honey [honey alias]
-  (-> honey
-      (m/rewrite
-        {(m/and (m/or ::bq/with :with) ?with) (m/some (m/seqable (m/seqable !query !query-alias) ...))
-         &                                    ?rest}
-        {?with [[(m/app #(normalize-expr % alias) !query) (m/app alias !query-alias)] ...]
-         &     (m/cata ?rest)}
+  (letfn [(vectorize [x] (if-not (vector? x)
+                           [x x]
+                           x))]
+    (-> honey
+        (m/rewrite
+          [?expr ?alias]
+          [(m/app #(normalize-expr % alias) ?expr) ?alias]
 
-        {:select           (m/and (m/gather (m/seqable !col-expr-with-alias !col-expr-alias))
-                                  (m/gather (m/and (m/not (m/seqable _ _))
-                                                   (m/and !col-expr-no-alias-1
-                                                          !col-expr-no-alias-2))))
-         :from             (m/and (m/gather (m/seqable !table-expr-with-alias !table-expr-alias))
-                                  (m/gather (m/and (m/not (m/seqable _ _))
-                                                   (m/and !table-expr-no-alias-1
-                                                          !table-expr-no-alias-2))))
-         :join             (m/and (m/gather (m/seqable (m/seqable !join-expr-with-alias !join-expr-alias)
-                                                       !join-condition))
-                                  (m/gather (m/seqable (m/and (m/not (m/seqable _ _))
-                                                              (m/and !join-expr-no-alias-1
-                                                                     !join-expr-no-alias-2))
-                                                       !join-condition)))
-         :where            (m/or (m/some ?where-expr)
-                                 (m/let [?where-expr true]))
-         :group-by         (m/seqable !group-by-expr ...)
-         :having           (m/seqable !having-expr ...)
-         :order-by         (m/seqable !order-by-expr ...)
-         :limit            ?limit
-         :offset           ?offset
+          {(m/and (m/or ::bq/with :with) ?with) (m/some (m/seqable (m/seqable !query !query-alias) ...))
+           &                                    ?rest}
+          {?with [[(m/app #(normalize-expr % alias) !query) (m/app alias !query-alias)] ...]
+           &     (m/cata ?rest)}
 
-         ; windowing clause entries
-         ::bq/partition-by (m/seqable !partition-expr ...)
-         ::bq/rows-between (m/seqable !rows-between-expr ...)}
-        {:select           [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
-                            [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
-         :from             [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
-                            [(m/app #(normalize-expr % alias) !table-expr-no-alias-1) (m/app alias !table-expr-no-alias-2)] ...]
-         :join             [[(m/app #(normalize-expr % alias) !table-expr-with-alias) !table-expr-alias] ...
-                            [(m/app #(normalize-expr % alias) !table-expr-no-alias-1) (m/app alias !table-expr-no-alias-2)] ...]
-         :where            (m/app #(normalize-expr % alias) ?where-expr)
-         :group-by         [(m/app #(normalize-expr % alias) !group-by-expr) ...]
-         :having           [(m/app #(normalize-expr % alias) !having-expr) ...]
-         :order-by         [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]
-         :limit            ?limit
-         :offset           ?offset
+          {:select           (m/and (m/gather (m/seqable !col-expr-with-alias !col-expr-alias))
+                                    (m/gather (m/and (m/not (m/seqable _ _))
+                                                     (m/and !col-expr-no-alias-1
+                                                            !col-expr-no-alias-2))))
+           :from             (m/seqable !from ...)
+           :join             (m/seqable !join !join-condition ...)
+           :where            (m/or (m/some ?where-expr)
+                                   (m/let [?where-expr true]))
+           :group-by         (m/seqable !group-by-expr ...)
+           :having           (m/seqable !having-expr ...)
+           :order-by         (m/seqable !order-by-expr ...)
+           :limit            ?limit
+           :offset           ?offset
 
-         ; windowing clause entries
-         ::bq/partition-by [(m/app #(normalize-expr % alias) !partition-expr) ...]
-         ::bq/rows-between [!rows-between-expr ...]})))
+           ; windowing clause entries
+           ::bq/partition-by (m/seqable !partition-expr ...)
+           ::bq/rows-between (m/seqable !rows-between-expr ...)}
+          {:select           [[(m/app #(normalize-expr % alias) !col-expr-with-alias) !col-expr-alias] ...
+                              [(m/app #(normalize-expr % alias) !col-expr-no-alias-1) (m/app alias !col-expr-no-alias-2)] ...]
+           :from             [(m/cata (m/app vectorize !from)) ...]
+           :join             [(m/cata (m/app vectorize !join)) (m/app #(normalize-expr % alias) !join-condition) ...]
+           :where            (m/app #(normalize-expr % alias) ?where-expr)
+           :group-by         [(m/app #(normalize-expr % alias) !group-by-expr) ...]
+           :having           [(m/app #(normalize-expr % alias) !having-expr) ...]
+           :order-by         [(m/app #(normalize-order-by-expr % alias) !order-by-expr) ...]
+           :limit            ?limit
+           :offset           ?offset
 
-(comment
-  (-> {:select [:a]
-       :from   [:t]
-       :join   [[:j :j-alias] [:= :t/k :j-alias/k]]}
-      (normalize-honey identity)))
+           ; windowing clause entries
+           ::bq/partition-by [(m/app #(normalize-expr % alias) !partition-expr) ...]
+           ::bq/rows-between [!rows-between-expr ...]}))))
 
 (def constant? (comp (some-fn #{Boolean Long String} nil?) (partial class)))
 
@@ -196,6 +182,7 @@
 
         {:select           [[!col-expr !col-alias] ...]
          :from             [[!from-expr !from-alias] ...]
+         :join             [[!join-expr !join-alias] !join-condition ...]
          :where            ?where-expr
          :group-by         [!group-by-expr ...]
          :having           [!having-expr ...]
@@ -205,7 +192,8 @@
          ::bq/partition-by [!partition-by-expr ...]
          ::bq/rows-between [!rows-between-expr ...]}
         {:select           (m/map-of !col-alias (m/app optimize-expr !col-expr))
-         :from             [[(m/app optimize-expr !from-expr) !from-alias] ...]
+         :from             (m/map-of !from-alias (m/app optimize-expr !from-expr))
+         :join             [[(m/app optimize-expr !join-expr) !join-alias] (m/app optimize-expr !join-condition) ...]
          :where            (m/app optimize-expr ?where-expr)
          :group-by         [(m/app optimize-expr !group-by-expr) ...]
          :having           [(m/app optimize-expr !having-expr) ...]
@@ -263,6 +251,7 @@
 
           {:select           (m/map-of !col-alias !col-expr)
            :from             [[!table-expr !table-alias] ...]
+           :join             [[!join-expr !join-alias] !join-condition ...]
            :where            ?where-expr
            :group-by         [!group-by-expr ...]
            :having           [!having-expr ...]
@@ -273,6 +262,7 @@
            ::bq/rows-between [!rows-between-expr ...]}
           {:select           [[(m/cata !col-expr) !col-alias] ...]
            :from             [[(m/cata !table-expr) !table-alias] ...]
+           :join             [[(m/cata !join-expr) !join-alias] (m/cata !join-condition) ...]
            :where            (m/cata ?where-expr)
            :group-by         [(m/cata !group-by-expr) ...]
            :having           [!having-expr ...]
@@ -292,9 +282,32 @@
   (into [] (x/by-key kfn vals-fn (x/into #{}))
         coll))
 
+(defn location [path query]
+  (m/rewrite [table-alias query]
+    [?table-alias {:with {?table-expr _}
+                   :from {?table-alias ?table-expr}}]
+    [:with ?table-expr]
+
+    [?table-alias {:from {_ ?table-expr}}]
+    [:from ?table-alias]
+
+    [?alias _]
+    []))
+
+(comment
+  (location :v (-> {:with   [[{:select [] :from [:t]} :cte]]
+                    :select [] :from [[:cte :v]]}
+                   (normalize-honey identity)
+                   (optimize-honey)))
+
+  (location :v (-> {:with   [[{:select [] :from [:t]} :cte]]
+                    :select [] :from [[{:select [] :from [:t]} :v]]}
+                   (normalize-honey identity)
+                   (optimize-honey))))
+
 (defn cols-to-push [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
   (my-group-by second first
-               (-> [optimized-honey [:inline ::query] {} []]
+               (-> [optimized-honey [] {} []]
                    (m/rewrite
                      [{(m/or ::bq/with :with) (m/map-of !query-alias !query) & ?rest}
                       ?location ?alias->location ?cols-to-push]
@@ -304,25 +317,21 @@
                      [{:select           (m/map-of _ !expr)
                        :from             (m/and [[?table-expr ?table-alias] & _]
                                                 (m/gather [{(m/some :select) _ :as !table-expr} !table-alias]))
-                       :where            (m/or (m/pred (complement true?) !expr)
-                                               (m/let [[!expr ...] []]))
+                       :where            !expr
                        :group-by         [!expr ...]
                        :having           [!expr ...]
                        :order-by         [[!expr _] ...]
-                       :limit            (m/or (m/pred (complement nil?) !expr)
-                                               (m/let [[!expr ...] []]))
-                       :offset           (m/or (m/pred (complement nil?) !expr)
-                                               (m/let [[!expr ...] []]))
+                       :limit            _
+                       :offset           _
                        ::bq/partition-by [!expr ...]
-                       ::bq/rows-between [!expr ...]}
+                       ::bq/rows-between [!expr ...] :as ?query}
                       ?location ?alias->location ?cols-to-push]
-                     [(m/cata [!expr [& ?location :inline ?table-expr]
+                     [(m/cata [!expr (m/app location :from ?table-alias ?query)
                                {&            ?alias->location
-                                ?table-alias [& ?location :inline ?table-expr]}
+                                ?table-alias (m/app location :from ?table-alias ?query)}
                                ?cols-to-push]) ...
-                      (m/cata [!table-expr [& ?location :inline ?table-expr]
-                               {&            ?alias->location
-                                ?table-alias [& ?location :inline ?table-expr]}
+                      (m/cata [!table-expr ?location
+                               ?alias->location
                                ?cols-to-push]) ...]
 
                      [(m/and (m/pred (partial instance? SqlCall) ?call)
@@ -353,18 +362,21 @@
 
 (comment
   (tap> *1)
-  {:with   [[{:select [] :from [:y]} :x]
-            [{:select [] :from [:x]} :t]]
-   :select [:a] :from [[{:select [] :from [:t]} :v]]}
 
-  (-> {:select [:a] :from [:t] :join [:w [:= :w/c :t/c]]}
+
+  (-> {:with   [[{:select [] :from [:t]} :v]]
+       :select [:a] :from [:v]}
       (normalize-honey identity)
-      #_(optimize-honey)
-      #_(cols-to-push qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))
+      (optimize-honey)
+      (cols-to-push qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))
 
   #_{:select [:a] :from [[:t :v]]}
-  #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
+  #_{:select [:a] :from [[{:select [:a] :from [:t]} :v]]}
   #_{:select [:v/a] :from [[:t :v]]}
+  #_{:select [:v/a] :from [[{:select [] :from [:t]} :v]]}
+  #_{:with   [[{:select [] :from [:y]} :x]
+              [{:select [] :from [:x]} :t]]
+     :select [:a] :from [[{:select [] :from [:t]} :v]]}
   #_{:select [[(sql/call "count" :a) :count-a]] :from [[{:select [] :from [:t]} :v]]}
   #_{:select [:a]
      :from   [[:t :outer]]
@@ -598,7 +610,7 @@
              (normalize-honey identity)
              (simplify))))
 
-  (is (= {:from [[:b :c] [:a :a]]}
+  (is (= {:from [[:a :a] [:b :c]]}
          (-> {:from [:a [:b :c]]}
              (normalize-honey identity)
              (simplify))))
