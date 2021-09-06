@@ -297,11 +297,11 @@
 (defn alias-location [table-alias ctx]
   (m/rewrite ctx
     {?cte-name    _
-     ~table-alias {:from {?table-alias ?cte-name}}}
+     ~table-alias {?table-alias ?cte-name}}
     [:with ?cte-name]
 
     {?cte-name _
-     nil       {:from {:c ?cte-name}}}
+     nil       {?table-alias ?cte-name}}
     [:with ?cte-name]
 
     {nil {:from {?table-alias {(m/some :select) _}}}}
@@ -318,10 +318,10 @@
 
 (defn cols-to-push [optimized-honey qualified-col? unqualified-col? col-table-ref unqualified-col]
   (my-group-by second first
-               (-> [optimized-honey (user/echo (merge {nil (dissoc optimized-honey :with ::bq/with)}
-                                                      (:with optimized-honey)
-                                                      (::bq/with optimized-honey)
-                                                      (:from optimize-honey)))
+               (-> [optimized-honey (merge {nil (dissoc optimized-honey :with ::bq/with)}
+                                           (:with optimized-honey)
+                                           (::bq/with optimized-honey)
+                                           (:from optimize-honey))
                     []]
                    (m/rewrite
                      [{(m/or ::bq/with :with) (m/and (m/map-of !query-alias (m/and !query-1 !query-2))
@@ -376,12 +376,17 @@
                      (m/app (partial apply concat) [(m/cata !element) ...])))))
 
 (comment
+
   (-> {:with   [[{:select [] :from [:y]} :x]
                 [{:select [] :from [:z]} :y]]
-       :select [:a] :from [:x]}
+       :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:x]}) :c]] :from [:x]}
       (normalize-honey identity)
       (optimize-honey)
-      (cols-to-push qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name)))
+      (push-down-once qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+      (push-down-once qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+      (push-down-once qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+      (reverse-optimize-honey table-name?)
+      (simplify))
 
   #_{:select [:a] :from [[:t :v]]}
   #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
@@ -468,14 +473,13 @@
              optimized-honey))))
 
 (comment
-  (quick-bench
-    (-> {:with   [[{:select [] :from [:y]} :x]
-                  [{:select [] :from [:z]} :y]]
-         :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:x]}) :c]] :from [:x]}
-        (normalize-honey identity)
-        (push-down table-name? qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
-        (reverse-optimize-honey table-name?)
-        (simplify))))
+  (-> {:with   [[{:select [] :from [:y]} :x]
+                [{:select [] :from [:z]} :y]]
+       :select [:a [(sql/call "FIRST_VALUE" {:select [:b] :from [:x]}) :c]] :from [:x]}
+      (normalize-honey identity)
+      (push-down table-name? qualified-col? unqualified-col? (comp keyword namespace) (comp keyword name))
+      (simplify)
+      (sql/format)))
 
 (deftest optimized-honey
   (is (= {:from [[:t :t]], :select [[:a :a] [:b :b]]}
