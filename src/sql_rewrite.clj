@@ -12,6 +12,8 @@
 ; intersection
 ; push down already fully qualified columns
 
+(def sql-call? (partial instance? SqlCall))
+
 (defn remove-unused-clauses [normalized-honey]
   (into {} (filter (complement #{[:select []]
                                  [:from []]
@@ -60,7 +62,7 @@
                 ::bq/rows-between [(m/cata !rows-between-expr) ...]
                 ::bq/partition-by [(m/cata !partition-by-expr) ...]})
 
-        (m/and (m/pred (partial instance? SqlCall) ?call)
+        (m/and (m/pred sql-call? ?call)
                {:args (m/seqable !arg ...)})
         (m/app assoc ?call :args (m/seqable (m/cata !arg) ...))
 
@@ -76,7 +78,7 @@
         {(m/or :order-by ::bq/partition-by ::bq/rows-between) _ :as ?windowing-clause}
         (m/app #(normalize-honey % alias) ?windowing-clause)
 
-        (m/and (m/pred (partial instance? SqlCall))
+        (m/and (m/pred sql-call?)
                {:name ?name :args (m/seqable !arg ...)})
         (m/app (partial apply sql/call) ?name [(m/app #(normalize-expr % alias) !arg) ...])
 
@@ -159,7 +161,7 @@
 (defn optimize-expr [expr]
   (-> expr
       (m/rewrite
-        (m/and (m/pred (partial instance? SqlCall) ?call)
+        (m/and (m/pred sql-call? ?call)
                {:args (m/seqable !expr ...)})
         (m/app assoc ?call :args (m/seqable (m/cata !expr) ...))
 
@@ -277,7 +279,7 @@
            ::bq/partition-by [(m/cata !partition-by-expr) ...]
            ::bq/rows-between [(m/cata !rows-between-expr) ...]}
 
-          (m/and (m/pred (partial instance? SqlCall) ?call)
+          (m/and (m/pred sql-call? ?call)
                  {:args (m/seqable !arg ...)})
           (m/app assoc ?call :args (m/seqable (m/cata !arg) ...))
 
@@ -302,7 +304,7 @@
 
 (defn cols-to-push [optimized-honey col-table-ref unqualified-col]
   (my-group-by second first
-               (-> [optimized-honey (merge {nil (dissoc optimized-honey :with ::bq/with)}
+               (-> [optimized-honey (merge {nil optimized-honey}
                                            (:with optimized-honey)
                                            (::bq/with optimized-honey)
                                            (:from optimize-honey))
@@ -316,7 +318,7 @@
                                          nil !query-2} ?cols-to-push]) ...
                       (m/cata [?rest ?ctx ?cols-to-push])]
 
-                     [(m/pred (partial instance? SqlCall)
+                     [(m/pred sql-call?
                               {:name (m/and (m/pred (complement nil?))
                                             (m/pred (comp (partial = "window") str/lower-case name)))
                                :args (m/seqable ?fn {:order-by         [[!expr _] ...]
@@ -325,8 +327,7 @@
                      [(m/cata [?fn ?ctx ?cols-to-push])
                       (m/cata [!expr ?ctx ?cols-to-push]) ...]
 
-                     [(m/pred (partial instance? SqlCall)
-                              {:args (m/seqable !arg ...)})
+                     [(m/pred sql-call? {:args (m/seqable !arg ...)})
                       ?ctx ?cols-to-push]
                      [(m/cata [!arg ?ctx ?cols-to-push]) ...]
 
@@ -392,10 +393,13 @@
                      :from   [[:t :inner]]
                      :where  [:= :inner/k :outer/k]}]})
 
-(defn incorporate-cols [optimized-honey cols-to-push]
+(defn push-down-once [optimized-honey col-table-ref unqualified-col]
   (reduce (fn [optimized-honey [path cols]]
-            (try (update-in optimized-honey path (partial apply conj) (sequence (map (fn [c] [c c]))
-                                                                                cols))
+            (try (update-in optimized-honey path (fn [m cols]
+                                                   (persistent! (reduce (fn [m* c] (assoc! m* c c))
+                                                                        (transient m)
+                                                                        cols)))
+                            cols)
                  (catch Throwable t
                    (throw (ex-info "Exception incorporating columns"
                                    {:optimized-honey optimized-honey
@@ -404,10 +408,7 @@
                                     :cols            cols}
                                    t)))))
           optimized-honey
-          cols-to-push))
-
-(defn push-down-once [optimized-honey col-table-ref unqualified-col]
-  (incorporate-cols optimized-honey (cols-to-push optimized-honey col-table-ref unqualified-col)))
+          (cols-to-push optimized-honey col-table-ref unqualified-col)))
 
 (comment
 
@@ -432,16 +433,17 @@
                      :where  [:= :inner/k :outer/k]}]})
 
 (defn push-down [normalized-honey col-table-ref unqualified-col]
-  (loop [i 10
-         optimized-honey (optimize-honey normalized-honey)
-         prev nil]
-    (when (zero? i)
-      (throw (ex-info "Too many push down loops"
-                      {:optimized-honey optimized-honey})))
-    (if (= prev optimized-honey)
-      (reverse-optimize-honey optimized-honey)
-      (recur (dec i)
-             (push-down-once optimized-honey col-table-ref unqualified-col)
-             optimized-honey))))
+  (let [push-down-once #(push-down-once % col-table-ref unqualified-col)]
+    (loop [i 10
+           optimized-honey (optimize-honey normalized-honey)
+           prev nil]
+      (when (zero? i)
+        (throw (ex-info "Too many push down loops"
+                        {:optimized-honey optimized-honey})))
+      (if (= prev optimized-honey)
+        (reverse-optimize-honey optimized-honey)
+        (recur (dec i)
+               (push-down-once (push-down-once (push-down-once (push-down-once (push-down-once optimized-honey)))))
+               optimized-honey)))))
 
 
