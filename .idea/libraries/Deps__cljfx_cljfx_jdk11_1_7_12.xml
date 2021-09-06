@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="Deps: cljfx/cljfx$jdk11:1.7.12">
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/cljfx/cljfx/1.7.12/cljfx-1.7.12-jdk11.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

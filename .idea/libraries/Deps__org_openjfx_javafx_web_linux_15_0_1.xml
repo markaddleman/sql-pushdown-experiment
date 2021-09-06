@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="Deps: org.openjfx/javafx-web$linux:15.0.1">
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/org/openjfx/javafx-web/15.0.1/javafx-web-15.0.1-linux.jar!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

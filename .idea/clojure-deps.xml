@@ -4,8 +4,7 @@
     <option name="enabledAliases">
       <set>
         <option value="dev" />
-        <option value="inspect/portal-cli" />
-        <option value="inspect/portal-web" />
+        <option value="inspect/reveal-light-nrepl" />
         <option value="performance/benchmark" />
         <option value="test" />
       </set>

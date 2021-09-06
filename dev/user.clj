@@ -1,20 +1,9 @@
-(ns user
-  (:require [portal.api :as inspect]))
-
-;; Start Portal inspector on REPL start
-
-;; Open a portal inspector window
-(inspect/open)
-
-;; Add portal as a tap> target
-(inspect/tap)
-
+(ns user)
 
 (comment
-  ;; Clear all values in the portal inspector window
-  (inspect/clear)
+  (require '[vlaaad.reveal :as reveal])
+  (add-tap (reveal/ui)))
 
-  ;; Close the inspector
-  (inspect/close)
-
-  ) ;; End of rich comment block
+(defn echo [x]
+  (tap> x)
+  x)
