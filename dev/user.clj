@@ -1,8 +1,7 @@
 (ns user)
 
 (comment
-  (require '[vlaaad.reveal :as reveal])
-  (add-tap (reveal/ui)))
+  (add-tap ((requiring-resolve 'vlaaad.reveal/ui))))
 
 (defn echo [x]
   (tap> x)
