@@ -14,7 +14,7 @@
         (push-down (comp keyword namespace) (comp keyword name))
         (simplify))))
 
-(deftest optimized-honey
+(deftest optimize
   (is (= {:from [[:t :t]], :select [[:a :a] [:b :b]]}
          (-> {:select [:a :b] :from [:t]}
              (normalize-honey identity)
@@ -29,7 +29,7 @@
              (reverse-optimize-honey)
              (simplify)))))
 
-(deftest normalize-select-exprs
+(deftest normalize
   (is (= {:select [[1 :alias]]})
       (-> {:select [1]}
           (normalize-honey (constantly :alias))
@@ -122,9 +122,8 @@
               :select [[:a :a]]
               :from   [[:x :x]]}
              (normalize-honey identity)
-             (simplify)))))
+             (simplify))))
 
-(deftest normalize-from-exprs
   (is (= {:from [[:a :a]]}
          (-> {:from [[:a :a]]}
              (normalize-honey identity)
@@ -148,24 +147,13 @@
   (is (= {:from [[:a :b] [:b :c]]}
          (-> {:from [[:a :b] [:b :c]]}
              (normalize-honey identity)
-             (simplify)))))
+             (simplify))))
 
-(deftest sub-selects
-  (is (= {:select [[{:from [[{:from [[:t :t]], :select [[:a :a]]} :t]], :select [[:a :a] [:b :b]]} :alias]]}
-         (-> {:select [[{:select [:a :b] :from [[{:select [:a] :from [:t]} :t]]} :alias]]}
+  (is (= {:from [[{:union-all [{:from [[:t1 :t1]]} {:from [[:t2 :t2]]}]} :t]], :select [[:a :a]]}
+         (-> {:select [:a]
+              :from   [[{:union-all [{:select [] :from [:t1]}
+                                     {:select [] :from [:t2]}]} :t]]}
              (normalize-honey identity)
-             (optimize-honey)
-             (reverse-optimize-honey)
-             (simplify)))))
-
-(deftest with-clause
-  (is (= {:from [[:v :v]], :select [[1 :a]], :with [[{:from [[:t :t]], :select [[:a :a]]} :v]]}
-         (-> {:with   [[{:select [:a] :from [:t]} :v]]
-              :select [[1 :a]]
-              :from   [:v]}
-             (normalize-honey identity)
-             (optimize-honey)
-             (reverse-optimize-honey)
              (simplify)))))
 
 (deftest push-downs
@@ -244,6 +232,22 @@
               :select [:a] :from [:v]}
              (normalize-honey identity)
              (push-down (comp keyword namespace) (comp keyword name))
+             (simplify))))
+
+  (is (= {:select [[{:from [[{:from [[:t :t]], :select [[:a :a]]} :t]], :select [[:a :a] [:b :b]]} :alias]]}
+         (-> {:select [[{:select [:a :b] :from [[{:select [:a] :from [:t]} :t]]} :alias]]}
+             (normalize-honey identity)
+             (optimize-honey)
+             (reverse-optimize-honey)
+             (simplify))))
+
+  (is (= {:from [[:v :v]], :select [[1 :a]], :with [[{:from [[:t :t]], :select [[:a :a]]} :v]]}
+         (-> {:with   [[{:select [:a] :from [:t]} :v]]
+              :select [[1 :a]]
+              :from   [:v]}
+             (normalize-honey identity)
+             (optimize-honey)
+             (reverse-optimize-honey)
              (simplify)))))
 
 (deftest topo-sorts
