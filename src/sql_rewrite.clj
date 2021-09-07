@@ -309,29 +309,33 @@
         coll))
 
 (defn push-paths [table-alias ctx]
-  (m/rewrite ctx
-    {?cte-name               {(m/and (m/or ::bq/union-distinct :union-all)
-                                     ?union) (m/and [_ & _] ?union-exprs)}
-     (m/or nil ~table-alias) {?table-alias ?cte-name}}
-    (m/app (fn [union-exprs] (into [] (map (fn [i] [:with ?cte-name ?union i :select])
-                                           (range 0 (count union-exprs)))))
-           ?union-exprs)
+  (-> [table-alias ctx]
+      (m/rewrite
+        [nil {nil {?table-alias {(m/some :select) _ :as ?ctx}}}]
+        [[:from ?table-alias] ?ctx]
 
-    {~table-alias {(m/and (m/or ::bq/union-distinct :union-all)
-                          ?union) (m/and [_ & _] ?union-exprs)}}
-    (m/app (fn [union-exprs] (into [] (map (fn [i] [:with table-alias ?union i :select])
-                                           (range 0 (count union-exprs)))))
-           ?union-exprs)
+        [?table-alias {?table-alias {(m/some :select) _ :as ?ctx}}]
+        [[:from ?table-alias] ?ctx]
 
-    {(m/or nil ~table-alias) {?table-alias {(m/some :select) _}}}
-    [[:from ?table-alias :select]]
+        [nil {(m/some ?cte-name) {(m/some :select) _ :as ?ctx}
+              nil                {_ ?cte-name}}]
+        [[:with ?cte-name] ?ctx]
 
-    {?cte-name               _
-     (m/or nil ~table-alias) {?table-alias ?cte-name}}
-    [[:with ?cte-name :select]]))
+        [?table-alias {(m/some ?cte-name) {(m/some :select) _ :as ?ctx}
+                       ?table-alias       ?cte-name}]
+        [[:with ?cte-name] ?ctx])
+      (m/rewrite
+        [?path-head {(m/and (m/or ::bq/union-distinct :union-all)
+                            ?union) [_ & _ :as ?union-exprs]}]
+        (m/app (fn [union-exprs] (into [] (map (fn [i] (concat ?path-head [?union i :select]))
+                                               (range 0 (count union-exprs)))))
+               ?union-exprs)
+
+        [[?a ?b] _]
+        [[?a ?b :select]])))
 
 (defn cols-to-push [optimized-honey col-table-ref unqualified-col]
-  (my-group-by second first
+  (my-group-by :push-to :column
                (-> [optimized-honey (merge {nil optimized-honey}
                                            (:with optimized-honey)
                                            (::bq/with optimized-honey)
@@ -363,43 +367,49 @@
                      ?cols-to-push
 
                      [{:select       (m/map-of _ !expr)
-                       :from         (m/gather [_ (m/and {(m/some :select) _} !table-expr-1 !table-expr-2)])
+                       :from         (m/and (m/gather (m/and [_ (m/and {(m/some :select) _} !table-expr)]))
+                                            ?from)
                        :from-default ?from-default
                        :where        !expr
                        :group-by     [!expr ...]
                        :having       [!expr ...]
                        :order-by     [[!expr _] ...] :as ?new-ctx}
                       ?ctx ?cols-to-push]
-                     [(m/cata [!expr {& ?ctx nil ?from-default} ?cols-to-push]) ...
-                      (m/cata [!table-expr-1 ?ctx ?cols-to-push]) ...]
+                     [(m/cata [!expr (m/app merge
+                                            ?ctx
+                                            (m/app (partial into #{} (filter (fn [[k v]] (not (= k v)))))
+                                                   ?from)
+                                            {nil ?from-default}) ?cols-to-push]) ...
+                      (m/cata [!table-expr ?ctx ?cols-to-push]) ...]
 
                      [(m/pred constant? _) ?ctx ?cols-to-push]
                      ?cols-to-push
 
                      [?col ?ctx ?cols-to-push]
                      (m/app (fn [col ctx cols-to-push]
-                              (user/echo cols-to-push)
-                              (into cols-to-push (map (fn [path] {:column col :push-to path}))
+                              (into cols-to-push (map (fn [path] {:column (unqualified-col col) :push-to path}))
                                     (push-paths (col-table-ref col) ctx)))
                             ?col ?ctx ?cols-to-push))
                    (m/rewrite
-                     [{(m/some :push-to) nil}]
-                     []
-
-                     [{(m/some :column)  ?col
-                       (m/some :push-to) ?location}]
-                     [[?col ?location]]
-
-                     [[[] & ?rest]]
+                     [(m/or [] nil) & ?rest]
                      (m/cata ?rest)
 
-                     [!element ...]
-                     (m/app (partial apply concat) [(m/cata !element) ...]))
-                   (user/echo))))
+                     [{(m/some :push-to) nil}]
+                     nil
+
+                     [{(m/some :column)  _
+                       (m/some :push-to) _ :as ?m} & ?rest]
+                     [?m & (m/cata ?rest)]
+
+                     (m/seqable !element ...)
+                     (m/app (partial apply concat) (m/seqable (m/cata !element) ...))))))
 
 (comment
-  (-> {:with   [[{:union-all [{:select [] :from [:physical]}]} :t]]
-       :select [:a] :from [[:t :v]]}
+
+  (-> {:with   [[{:union-all [{:select [] :from [:y]}
+                              {:select [] :from [:x]}]} :v]]
+       :select [:a]
+       :from   [:v]}
       (normalize-honey identity)
       (optimize-honey)
       (cols-to-push (comp keyword namespace) (comp keyword name)))
@@ -431,18 +441,19 @@
 
 (defn push-down-once [optimized-honey col-table-ref unqualified-col]
   (reduce (fn [optimized-honey [path cols]]
-            (try (update-in optimized-honey path (fn [m cols]
-                                                   (persistent! (reduce (fn [m* c] (assoc! m* c c))
-                                                                        (transient m)
-                                                                        cols)))
-                            cols)
-                 (catch Throwable t
-                   (throw (ex-info "Exception incorporating columns"
-                                   {:optimized-honey optimized-honey
-                                    :path            path
-                                    :at-location     (get-in optimized-honey path)
-                                    :cols            cols}
-                                   t)))))
+            (try
+              (update-in optimized-honey path (fn [m cols]
+                                                (persistent! (reduce (fn [m* c] (assoc! m* c c))
+                                                                     (transient m)
+                                                                     cols)))
+                         cols)
+              (catch Throwable t
+                (throw (ex-info "Exception incorporating columns"
+                                {:optimized-honey optimized-honey
+                                 :path            path
+                                 :at-location     (get-in optimized-honey path)
+                                 :cols            cols}
+                                t)))))
           optimized-honey
           (cols-to-push optimized-honey col-table-ref unqualified-col)))
 
@@ -481,3 +492,12 @@
         (recur (dec i)
                (push-down-once optimized-honey)
                optimized-honey)))))
+
+(comment
+  (-> {:with   [[{:union-all [{:select [] :from [:y]}
+                              {:select [] :from [:x]}]} :v]]
+       :select [:a]
+       :from   [:v]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (push-down-once (comp keyword namespace) (comp keyword name))))

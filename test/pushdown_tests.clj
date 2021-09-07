@@ -250,7 +250,25 @@
              (reverse-optimize-honey)
              (simplify))))
 
-  (is (= {}
+  (is (= {:where  (sql/call "exists" {:where (sql/call "=" :outer/ko :inner/ki), :from [[:i :inner]], :select [[1 1]]}),
+          :from   [[:o :outer]],
+          :select [[:a :a]],
+          :with   [[{:from [[:physical :physical]], :select [[:ko :ko] [:a :a]]} :o]
+                   [{:from [[:physical :physical]], :select [[:ki :ki]]} :i]]}
+         (-> {:with   [[{:select [] :from [:physical]} :i]
+                       [{:select [] :from [:physical]} :o]]
+              :select [:a]
+              :from   [[:o :outer]]
+              :where  (sql/call "exists" {:select [1]
+                                          :from   [[:i :inner]]
+                                          :where  [:= :outer/ko :inner/ki]})}
+             (normalize-honey identity)
+             (push-down (comp keyword namespace) (comp keyword name))
+             (simplify))))
+
+  (is (= {:from   [[:v :v]],
+          :select [[:a :a]],
+          :with   [[{:union-all [{:from [[:y :y]], :select [[:a :a]]} {:from [[:x :x]], :select [[:a :a]]}]} :v]]}
          (-> {:with   [[{:union-all [{:select [] :from [:y]}
                                      {:select [] :from [:x]}]} :v]]
               :select [:a]
