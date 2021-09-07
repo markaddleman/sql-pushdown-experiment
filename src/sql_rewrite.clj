@@ -8,7 +8,6 @@
   (:import [honeysql.types SqlCall]))
 
 ; joins
-; unions
 ; intersection
 ; push down already fully qualified columns
 
