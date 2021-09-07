@@ -308,18 +308,27 @@
   (into [] (x/by-key kfn vals-fn (x/into #{}))
         coll))
 
-(defn push-path [table-alias ctx]
+(defn push-paths [table-alias ctx]
   (m/rewrite ctx
-    {?cte-name    _
-     ~table-alias {?table-alias ?cte-name}}
-    [:with ?cte-name :select]
+    {?cte-name               {(m/and (m/or ::bq/union-distinct :union-all)
+                                     ?union) (m/and [_ & _] ?union-exprs)}
+     (m/or nil ~table-alias) {?table-alias ?cte-name}}
+    (m/app (fn [union-exprs] (into [] (map (fn [i] [:with ?cte-name ?union i :select])
+                                           (range 0 (count union-exprs)))))
+           ?union-exprs)
 
-    {?cte-name _
-     nil       {?table-alias ?cte-name}}
-    [:with ?cte-name :select]
+    {~table-alias {(m/and (m/or ::bq/union-distinct :union-all)
+                          ?union) (m/and [_ & _] ?union-exprs)}}
+    (m/app (fn [union-exprs] (into [] (map (fn [i] [:with table-alias ?union i :select])
+                                           (range 0 (count union-exprs)))))
+           ?union-exprs)
 
-    {nil {?table-alias {(m/some :select) _}}}
-    [:from ?table-alias :select]))
+    {(m/or nil ~table-alias) {?table-alias {(m/some :select) _}}}
+    [[:from ?table-alias :select]]
+
+    {?cte-name               _
+     (m/or nil ~table-alias) {?table-alias ?cte-name}}
+    [[:with ?cte-name :select]]))
 
 (defn cols-to-push [optimized-honey col-table-ref unqualified-col]
   (my-group-by second first
@@ -368,10 +377,11 @@
                      ?cols-to-push
 
                      [?col ?ctx ?cols-to-push]
-                     [{:column  (m/app unqualified-col ?col)
-                       :push-to (m/app (fn [col query] (push-path (col-table-ref col) query))
-                                       ?col ?ctx)}
-                      & ?cols-to-push])
+                     (m/app (fn [col ctx cols-to-push]
+                              (user/echo cols-to-push)
+                              (into cols-to-push (map (fn [path] {:column col :push-to path}))
+                                    (push-paths (col-table-ref col) ctx)))
+                            ?col ?ctx ?cols-to-push))
                    (m/rewrite
                      [{(m/some :push-to) nil}]
                      []
@@ -384,9 +394,16 @@
                      (m/cata ?rest)
 
                      [!element ...]
-                     (m/app (partial apply concat) [(m/cata !element) ...])))))
+                     (m/app (partial apply concat) [(m/cata !element) ...]))
+                   (user/echo))))
 
 (comment
+  (-> {:with   [[{:union-all [{:select [] :from [:physical]}]} :t]]
+       :select [:a] :from [[:t :v]]}
+      (normalize-honey identity)
+      (optimize-honey)
+      (cols-to-push (comp keyword namespace) (comp keyword name)))
+
   #_{:select [:a] :from [[:t :v]]}
   #_{:select [:a] :from [[{:select [] :from [:t]} :v]]}
   #_{:select [:a] :from [[{:select [:a] :from [:t]} :v]]}
@@ -462,5 +479,5 @@
       (if (= prev optimized-honey)
         (reverse-optimize-honey optimized-honey)
         (recur (dec i)
-               (push-down-once (push-down-once (push-down-once (push-down-once (push-down-once optimized-honey)))))
+               (push-down-once optimized-honey)
                optimized-honey)))))

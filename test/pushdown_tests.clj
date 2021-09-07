@@ -248,6 +248,15 @@
              (normalize-honey identity)
              (optimize-honey)
              (reverse-optimize-honey)
+             (simplify))))
+
+  (is (= {}
+         (-> {:with   [[{:union-all [{:select [] :from [:y]}
+                                     {:select [] :from [:x]}]} :v]]
+              :select [:a]
+              :from   [:v]}
+             (normalize-honey identity)
+             (push-down (comp keyword namespace) (comp keyword name))
              (simplify)))))
 
 (deftest topo-sorts
